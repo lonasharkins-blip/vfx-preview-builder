@@ -39,6 +39,10 @@ from sources.vfx_studio import (
 LOGGER = logging.getLogger("vfx_preview_builder")
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "preview_config.json"
+# Entra no hash de cada página para que qualquer mudança real no código do
+# gerador invalide automaticamente os GIFs antigos. Assim não dependemos de
+# lembrar de aumentar manualmente generator_version a cada ajuste visual.
+GENERATOR_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 ASSET_DELIVERY_URL = "https://apis.roblox.com/asset-delivery-api/v1/assetId/{asset_id}"
 MAX_DELIVERY_RESPONSE_BYTES = 64 * 1024
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
@@ -153,6 +157,7 @@ class BuilderConfig:
 
         return {
             "generator_version": self.generator_version,
+            "generator_source_sha256": GENERATOR_SOURCE_SHA256,
             "items_per_page": self.items_per_page,
             "columns": self.columns,
             "rows": self.rows,

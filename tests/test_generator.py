@@ -95,6 +95,13 @@ class BuilderTests(unittest.TestCase):
         changed = (self._item(1, 2), self._item(2, 8))
         self.assertNotEqual(first, page_hash(self.config, "Fire", changed))
 
+
+    def test_render_fingerprint_tracks_generator_source(self) -> None:
+        fingerprint = self.config.render_fingerprint()
+        source_hash = fingerprint.get("generator_source_sha256")
+        self.assertIsInstance(source_hash, str)
+        self.assertRegex(source_hash, r"^[0-9a-f]{64}$")
+
     def test_timeline_never_uses_lcm(self) -> None:
         self.assertEqual(adaptive_fps(self.config, 4), 12)
         self.assertEqual(adaptive_fps(self.config, 16), 20)

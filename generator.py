@@ -624,31 +624,15 @@ def _build_static_page(
     header_right = width - config.margin
     draw.line((panel_box[0], header_bottom, panel_box[2], header_bottom), fill=divider_fill, width=1)
 
-    page_text_width, page_text_height = _text_size(page_font, page_indicator)
-    pill_height = 30
-    pill_width = max(54, page_text_width + 26)
-    pill_right = header_right - 2
-    pill_left = pill_right - pill_width
-    pill_top = header_top + 13
-    pill_bottom = pill_top + pill_height
-
-    # O título agora fica sozinho, centralizado visualmente no espaço
-    # disponível à esquerda do indicador de página.
-    title_area_left = header_left + 14
-    title_area_right = pill_left - 16
-    if title_area_right <= title_area_left:
-        title_area_left = header_left + 14
-        title_area_right = header_right - 14
+    # Cabeçalho minimalista: sem título, apenas o indicador X/Y
+    # centralizado visualmente.
     _centered_text(
         draw,
-        (title_area_left, header_top, title_area_right, header_bottom),
-        page_title,
+        (header_left, header_top, header_right, header_bottom),
+        page_indicator,
         title_font,
         text_fill,
     )
-
-    draw.rounded_rectangle((pill_left, pill_top, pill_right, pill_bottom), radius=14, fill=pill_fill, outline=outer_border, width=1)
-    _centered_text(draw, (pill_left, pill_top, pill_right, pill_bottom), page_indicator, page_font, muted_fill)
 
     layouts: list[SlotLayout] = []
     grid_top = config.margin + config.page_header_height + config.gap

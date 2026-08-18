@@ -217,6 +217,43 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(index[("Fire", 1)]["hash"], "abc")
         self.assertEqual(index[("Smoke", 2)]["hash"], "def")
 
+
+    def test_gif_static_design_colors_stay_identical_between_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "animated.png"
+            self._spritesheet(path, 8)
+            item = self._item(77, 8)
+            slot = DownloadSlot(item, path)
+            output = root / "stable-colors.gif"
+            plan = PagePlan(
+                "Fire", sanitize_category("Fire"), 1, 1, (item,),
+                page_hash(self.config, "Fire", (item,)),
+                "vfx-studio/test/pages/fire/001.gif",
+            )
+            render_page_gif(plan, [slot], output, self.config)
+
+            width, _height, _content = geometry(self.config)
+            grid_top = self.config.margin + self.config.page_header_height + self.config.gap
+            samples = (
+                (1, 1),
+                (10, 10),
+                (self.config.margin + 4, grid_top + 4),
+                (self.config.margin + 4, grid_top + self.config.card_header_height + 4),
+                (width - 10, 10),
+            )
+            observed: list[tuple[tuple[int, int, int], ...]] = []
+            with Image.open(output) as gif:
+                for frame_index in range(getattr(gif, "n_frames", 1)):
+                    gif.seek(frame_index)
+                    rgb = gif.convert("RGB")
+                    try:
+                        observed.append(tuple(rgb.getpixel(point) for point in samples))
+                    finally:
+                        rgb.close()
+            self.assertGreater(len(observed), 1)
+            self.assertTrue(all(frame == observed[0] for frame in observed[1:]))
+
     def test_render_mixed_2_4_8_grid_and_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

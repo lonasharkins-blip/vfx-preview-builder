@@ -33,7 +33,7 @@ Texture ID
 [preview animado]
 ```
 
-A versão atual usa um layout de galeria em tema escuro, com cabeçalho discreto, cards arredondados e IDs desenhados de forma que não sejam cortados.
+A versão atual usa um layout de galeria em tema escuro, com cabeçalho discreto, título realmente centralizado, cards arredondados e IDs desenhados de forma que não sejam cortados.
 
 Medidas atuais do layout:
 
@@ -41,6 +41,8 @@ Medidas atuais do layout:
 - **696 × 958 px** por página;
 - cards com **326 px de largura**;
 - cabeçalho do card separado da área preta do preview.
+
+O GIF usa uma **paleta global fixa por página**. Isso mantém fundo, cards, bordas e cabeçalhos exatamente no mesmo tom durante todos os frames, evitando o efeito visual de cores mudando sutilmente.
 
 O builder preserva:
 

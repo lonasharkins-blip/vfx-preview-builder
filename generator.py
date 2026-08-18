@@ -618,8 +618,6 @@ def _build_static_page(
     header_left = config.margin
     header_right = width - config.margin
     draw.line((panel_box[0], header_bottom, panel_box[2], header_bottom), fill=divider_fill, width=1)
-    _draw_spark_icon(draw, header_left + 18, header_top + 18, color=text_fill, accent=accent_fill)
-    _left_text(draw, (header_left + 44, header_top + 16), page_title, title_font, text_fill)
 
     page_text_width, page_text_height = _text_size(page_font, page_indicator)
     pill_height = 30
@@ -628,6 +626,38 @@ def _build_static_page(
     pill_left = pill_right - pill_width
     pill_top = header_top + 13
     pill_bottom = pill_top + pill_height
+
+    # Centraliza o grupo [ícone + espaço + título] como um bloco só,
+    # evitando tanto o texto torto quanto o ícone colado nele.
+    icon_width = 22
+    icon_gap = 10
+    title_width, title_height = _text_size(title_font, page_title)
+    group_width = icon_width + icon_gap + title_width
+    title_area_left = header_left + 14
+    title_area_right = pill_left - 16
+    if title_area_right <= title_area_left:
+        title_area_left = header_left + 14
+        title_area_right = header_right - 14
+    group_left = title_area_left + max(0, (title_area_right - title_area_left - group_width) // 2)
+    icon_x = group_left + 8
+    icon_y = header_top + max(10, (config.page_header_height - 20) // 2)
+    _draw_spark_icon(
+        draw,
+        icon_x,
+        icon_y,
+        color=text_fill,
+        accent=accent_fill,
+    )
+    title_x = group_left + icon_width + icon_gap
+    title_y = header_top + max(0, (header_bottom - header_top - title_height) // 2) - 1
+    _left_text(
+        draw,
+        (title_x, title_y),
+        page_title,
+        title_font,
+        text_fill,
+    )
+
     draw.rounded_rectangle((pill_left, pill_top, pill_right, pill_bottom), radius=14, fill=pill_fill, outline=outer_border, width=1)
     _centered_text(draw, (pill_left, pill_top, pill_right, pill_bottom), page_indicator, page_font, muted_fill)
 
@@ -706,54 +736,42 @@ def render_rgba_frame(
     return canvas
 
 
-def rgba_to_gif_frame(image: Image.Image, config: BuilderConfig) -> Image.Image:
-    """Converte RGBA para GIF reservando um índice exclusivo à transparência.
+def build_gif_palette(
+    image: Image.Image,
+    config: BuilderConfig,
+) -> Image.Image:
+    """Cria uma única paleta para a página inteira.
 
-    GIF não suporta alpha parcial. Pixels com alpha <= threshold ficam realmente
-    transparentes; os demais usam a paleta normal da imagem.
+    O layout final é totalmente opaco. Usar uma paleta global evita que o Pillow
+    recalcule os tons escuros em cada frame, o que causava uma mudança sutil de
+    cor nos cards/fundo durante a animação.
     """
 
-    rgba = image.convert("RGBA")
+    rgb = image.convert("RGB")
     try:
-        alpha = rgba.getchannel("A")
-        rgb = Image.new("RGB", rgba.size, (0, 0, 0))
-        visible_mask = alpha.point(
-            lambda value: 255 if value > config.gif_alpha_threshold else 0
-        )
-        rgb_visible = rgba.convert("RGB")
-        try:
-            rgb.paste(rgb_visible, (0, 0), visible_mask)
-        finally:
-            rgb_visible.close()
-            visible_mask.close()
-
-        paletted = rgb.quantize(
-            colors=config.gif_palette_colors,
+        return rgb.quantize(
+            colors=min(256, config.gif_palette_colors),
             method=Image.Quantize.MEDIANCUT,
             dither=Image.Dither.FLOYDSTEINBERG,
         )
+    finally:
         rgb.close()
 
-        palette = list(paletted.getpalette() or [])
-        palette.extend([0] * (768 - len(palette)))
-        # O índice 255 é reservado exclusivamente aos pixels transparentes.
-        palette[255 * 3 : 255 * 3 + 3] = [0, 0, 0]
-        paletted.putpalette(palette[:768])
 
-        transparent_mask = alpha.point(
-            lambda value: 255 if value <= config.gif_alpha_threshold else 0
+def rgba_to_fixed_palette_frame(
+    image: Image.Image,
+    palette: Image.Image,
+) -> Image.Image:
+    """Converte um frame usando exatamente a mesma paleta dos demais."""
+
+    rgb = image.convert("RGB")
+    try:
+        return rgb.quantize(
+            palette=palette,
+            dither=Image.Dither.FLOYDSTEINBERG,
         )
-        try:
-            paletted.paste(255, (0, 0), transparent_mask)
-        finally:
-            transparent_mask.close()
-            alpha.close()
-
-        paletted.info["transparency"] = 255
-        paletted.info["disposal"] = 2
-        return paletted
     finally:
-        rgba.close()
+        rgb.close()
 
 
 def render_page_gif(
@@ -785,7 +803,8 @@ def render_page_gif(
 
         first_rgba = render_rgba_frame(decoded, config, tick=0, prepared=prepared)
         try:
-            first = rgba_to_gif_frame(first_rgba, config)
+            palette = build_gif_palette(first_rgba, config)
+            first = rgba_to_fixed_palette_frame(first_rgba, palette)
         finally:
             first_rgba.close()
 
@@ -797,7 +816,7 @@ def render_page_gif(
                         previous.close()
                     rgba = render_rgba_frame(decoded, config, tick=tick, prepared=prepared)
                     try:
-                        previous = rgba_to_gif_frame(rgba, config)
+                        previous = rgba_to_fixed_palette_frame(rgba, palette)
                     finally:
                         rgba.close()
                     yield previous
@@ -813,13 +832,14 @@ def render_page_gif(
                 append_images=remaining_frames(),
                 duration=duration_ms,
                 loop=0,
-                disposal=2,
-                transparency=255,
-                # Mantém a mesma otimização de GIF usada hoje pelo /ro-flipbooks.
-                optimize=True,
+                # Frames completos e opacos não precisam de transparência/disposal.
+                # optimize=False preserva a mesma paleta global em toda animação.
+                disposal=1,
+                optimize=False,
             )
         finally:
             first.close()
+            palette.close()
 
         width, height, _ = geometry(config)
         return RenderResult(

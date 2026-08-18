@@ -1,0 +1,62 @@
+name: Generate VFX previews
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "test gera só 1–2 páginas; full gera toda a biblioteca"
+        required: true
+        default: test
+        type: choice
+        options:
+          - test
+          - full
+      test_pages:
+        description: "Quantidade de páginas no modo test"
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+
+# O token temporário do Actions só precisa escrever nos Releases deste repositório.
+permissions:
+  contents: write
+
+concurrency:
+  group: vfx-preview-builder-${{ inputs.mode }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      BUILD_MODE: ${{ inputs.mode }}
+      TEST_PAGE_LIMIT: ${{ inputs.test_pages }}
+      ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Run local tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Generate and publish previews
+        run: python generator.py

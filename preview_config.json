@@ -1,7 +1,9 @@
 {
-  "generator_version": "1.4.2",
-  "source_key": "vfx-studio",
-  "catalog_url": "https://raw.githubusercontent.com/Sytranom/VFXStudio/refs/heads/main/VFXData.json",
+  "generator_version": "1.5.0",
+  "enabled_sources": [
+    "vfx-studio",
+    "zonito-visuals"
+  ],
   "items_per_page": 6,
   "columns": 2,
   "rows": 3,

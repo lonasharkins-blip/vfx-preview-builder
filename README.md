@@ -1,30 +1,25 @@
 # VFX Preview Builder
 
-Projeto independente do Discord bot para pré-gerar as páginas animadas do **VFX Studio** em GitHub Actions e hospedar os GIFs em **GitHub Releases**.
+Projeto independente do Discord bot para pré-gerar páginas animadas do **VFX Studio** e do **ZonitoVisuals** em GitHub Actions e hospedar os GIFs em **GitHub Releases**.
 
 O bot Discord não faz parte deste repositório e não é alterado por este projeto.
 
 ## Arquitetura
 
 ```text
-VFXData.json
-↓
-GitHub Actions
-↓
-Python + Pillow
-↓
-GIFs compostos 2×3
-↓
-GitHub Release pública
-↓
-URLs HTTPS públicas
+VFX Studio (VFXData.json) ─┐
+                           ├→ GitHub Actions → Python + Pillow → GIFs 2×3
+ZonitoVisuals 3.2 ─────────┘                         ↓
+                                      Releases públicas separadas
+                                                   ↓
+                                          URLs HTTPS públicas
 ```
 
 Não usa Cloudflare R2, cartão, boto3, cookies Roblox ou `.ROBLOSECURITY`.
 
 ## O que é gerado
 
-Cada página contém até **6 flipbooks**, em **2 colunas × 3 linhas**.
+Cada fonte é processada separadamente. Cada página contém até **6 flipbooks**, em **2 colunas × 3 linhas**.
 
 Cada célula mantém:
 
@@ -33,7 +28,7 @@ Texture ID
 [preview animado]
 ```
 
-A versão atual usa um layout de galeria em tema escuro, com cabeçalho discreto, título realmente centralizado, cards arredondados e IDs desenhados de forma que não sejam cortados.
+A versão atual usa um layout de galeria em tema escuro, com **somente o indicador `X/Y` centralizado no cabeçalho**, cards arredondados e IDs desenhados de forma que não sejam cortados.
 
 Medidas atuais do layout:
 
@@ -57,19 +52,14 @@ A timeline não usa MMC. Cada VFX simplesmente usa `tick % quantidade_de_frames`
 
 ## Releases usadas
 
-O modo de teste usa uma Release separada:
+Cada fonte possui suas próprias Releases. Isso evita misturar assets e mantém cada biblioteca longe do limite de 1000 assets por Release do GitHub.
 
-```text
-vfx-previews-test
-```
+| Fonte | Teste | Full |
+| --- | --- | --- |
+| VFX Studio | `vfx-previews-test` | `vfx-previews` |
+| ZonitoVisuals | `vfx-previews-zonito-test` | `vfx-previews-zonito` |
 
-O modo completo usa:
-
-```text
-vfx-previews
-```
-
-Assim um teste não altera a biblioteca definitiva.
+Assim um teste não altera a biblioteca definitiva e uma fonte nunca apaga assets da outra.
 
 Os GIFs recebem nomes imutáveis com hash dos dados da página e hash real do arquivo gerado, por exemplo:
 
@@ -109,7 +99,7 @@ O manifest inclui, entre outros dados:
 - FPS e quantidade de frames;
 - falhas individuais.
 
-Não existe `manifest.json` mutável. Para evitar cache velho, o manifest também é content-addressed. A versão atual é descoberta pela Release `vfx-previews-test` ou `vfx-previews`, escolhendo o `manifest--*.json` mais recente.
+Não existe `manifest.json` mutável. Para evitar cache velho, o manifest também é content-addressed. Cada fonte publica seu próprio manifest dentro de sua própria Release.
 
 ## Incremental
 
@@ -225,19 +215,14 @@ Não use `full` ainda.
 
 Se o workflow terminar verde, abra a área **Releases** do repositório.
 
-Deve existir:
+Devem existir duas Releases de teste:
 
 ```text
-VFX previews (test)
+VFX previews (test)          → vfx-previews-test
+ZonitoVisuals previews (test) → vfx-previews-zonito-test
 ```
 
-com tag:
-
-```text
-vfx-previews-test
-```
-
-Ela deve conter pelo menos:
+Cada uma deve conter pelo menos:
 
 - um `page--....gif`;
 - um `manifest--test--....json`.
@@ -254,10 +239,12 @@ Abra o GIF pelo navegador e confira principalmente:
 Se o GIF carregar e animar, a prova de arquitetura foi concluída:
 
 ```text
-GitHub Actions → Roblox → Pillow → GitHub Releases → HTTPS
+GitHub Actions → VFX Studio/ZonitoVisuals → Roblox → Pillow → GitHub Releases → HTTPS
 ```
 
 ## Modo full
+
+No modo `full`, o GitHub Actions abre **um job separado para cada fonte** (`vfx-studio` e `zonito-visuals`). Eles podem rodar em paralelo, cada um com sua própria Release e seu próprio limite de tempo. Se uma fonte falhar completamente, o job dela fica vermelho e o manifest daquela fonte não é substituído; a outra fonte não tem seus assets apagados.
 
 Somente depois de validar `test`:
 
@@ -268,11 +255,11 @@ Actions
 → mode: full
 ```
 
-Isso usa outra Release (`vfx-previews`) e processa todas as páginas necessárias.
+Isso processa todas as páginas necessárias nas duas Releases full: `vfx-previews` (VFX Studio) e `vfx-previews-zonito` (ZonitoVisuals).
 
 ## Relatório do Actions
 
-No final do job, o Step Summary mostra:
+No final de **cada job/fonte**, o Step Summary mostra:
 
 - páginas analisadas;
 - páginas reaproveitadas;

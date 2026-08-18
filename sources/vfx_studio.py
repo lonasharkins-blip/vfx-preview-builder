@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 SOURCE_KEY = "vfx-studio"
 SOURCE_NAME = "VFX Studio"
+CATALOG_URL = "https://raw.githubusercontent.com/Sytranom/VFXStudio/refs/heads/main/VFXData.json"
+SOURCE_PARSER_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 SUPPORTED_GRID_SIZES = frozenset({2, 4, 8})
 INTERFACE_FILTER_NAMES = frozenset({"All", "User", "Static", "Flipbook"})
 

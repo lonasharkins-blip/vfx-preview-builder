@@ -1,4 +1,4 @@
-"""Pré-gera páginas GIF do VFX Studio e publica em GitHub Releases.
+"""Pré-gera páginas GIF de bibliotecas VFX e publica em GitHub Releases.
 
 Este programa é propositalmente independente do Discord bot. Ele lê configuração
 não sensível de preview_config.json e recebe credenciais somente por variáveis de
@@ -21,20 +21,14 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote, urljoin, urlsplit
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
-from sources.vfx_studio import (
-    SOURCE_KEY,
-    SOURCE_NAME,
-    InvalidCatalogError,
-    VFXCatalog,
-    VFXItem,
-    parse_catalog_bytes,
-)
+from sources.vfx_studio import InvalidCatalogError, VFXCatalog, VFXItem
+from sources import vfx_studio, zonito_visuals
 
 LOGGER = logging.getLogger("vfx_preview_builder")
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -50,8 +44,6 @@ SUPPORTED_IMAGE_FORMATS = frozenset({"PNG", "JPEG", "WEBP", "GIF", "BMP", "TGA"}
 GITHUB_API_VERSION = "2026-03-10"
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_UPLOAD_BASE = "https://uploads.github.com"
-RELEASE_TAG_TEST = "vfx-previews-test"
-RELEASE_TAG_FULL = "vfx-previews"
 MAX_MANIFEST_BYTES = 5 * 1024 * 1024
 GITHUB_RELEASE_ASSET_HARD_LIMIT = 1000
 GITHUB_RELEASE_ASSET_WARNING_LIMIT = 900
@@ -82,10 +74,55 @@ class InvalidSpritesheetError(BuilderError):
 
 
 @dataclass(frozen=True, slots=True)
+class SourceSpec:
+    key: str
+    name: str
+    catalog_url: str
+    parse_catalog_bytes: Callable[[bytes], VFXCatalog]
+    parser_sha256: str
+    test_release_tag: str
+    full_release_tag: str
+    test_release_name: str
+    full_release_name: str
+
+    def release_tag(self, mode: str) -> str:
+        return self.test_release_tag if mode == "test" else self.full_release_tag
+
+    def release_name(self, mode: str) -> str:
+        return self.test_release_name if mode == "test" else self.full_release_name
+
+
+SOURCE_SPECS: tuple[SourceSpec, ...] = (
+    SourceSpec(
+        key=vfx_studio.SOURCE_KEY,
+        name=vfx_studio.SOURCE_NAME,
+        catalog_url=vfx_studio.CATALOG_URL,
+        parse_catalog_bytes=vfx_studio.parse_catalog_bytes,
+        parser_sha256=vfx_studio.SOURCE_PARSER_SHA256,
+        test_release_tag="vfx-previews-test",
+        full_release_tag="vfx-previews",
+        test_release_name="VFX previews (test)",
+        full_release_name="VFX previews",
+    ),
+    SourceSpec(
+        key=zonito_visuals.SOURCE_KEY,
+        name=zonito_visuals.SOURCE_NAME,
+        catalog_url=zonito_visuals.CATALOG_URL,
+        parse_catalog_bytes=zonito_visuals.parse_catalog_bytes,
+        parser_sha256=zonito_visuals.SOURCE_PARSER_SHA256,
+        test_release_tag="vfx-previews-zonito-test",
+        full_release_tag="vfx-previews-zonito",
+        test_release_name="ZonitoVisuals previews (test)",
+        full_release_name="ZonitoVisuals previews",
+    ),
+)
+SOURCE_SPECS_BY_KEY = {source.key: source for source in SOURCE_SPECS}
+
+
+@dataclass(frozen=True, slots=True)
 class BuilderConfig:
     generator_version: str
-    source_key: str
-    catalog_url: str
+    enabled_sources: list[str]
     items_per_page: int
     columns: int
     rows: int
@@ -127,8 +164,15 @@ class BuilderConfig:
         return config
 
     def validate(self) -> None:
-        if self.source_key != SOURCE_KEY:
-            raise MissingConfigurationError("Esta versão aceita somente VFX Studio.")
+        if not self.enabled_sources:
+            raise MissingConfigurationError("enabled_sources precisa conter pelo menos uma fonte.")
+        unknown_sources = [key for key in self.enabled_sources if key not in SOURCE_SPECS_BY_KEY]
+        if unknown_sources:
+            raise MissingConfigurationError(
+                "Fonte(s) desconhecida(s) em enabled_sources: " + ", ".join(unknown_sources)
+            )
+        if len(set(self.enabled_sources)) != len(self.enabled_sources):
+            raise MissingConfigurationError("enabled_sources não pode repetir fontes.")
         if self.items_per_page != self.columns * self.rows:
             raise MissingConfigurationError("items_per_page precisa coincidir com columns × rows.")
         if (self.items_per_page, self.columns, self.rows) != (6, 2, 3):
@@ -190,14 +234,6 @@ class Environment:
     mode: str
     test_page_limit: int
 
-    @property
-    def release_tag(self) -> str:
-        return RELEASE_TAG_TEST if self.mode == "test" else RELEASE_TAG_FULL
-
-    @property
-    def release_name(self) -> str:
-        return "VFX previews (test)" if self.mode == "test" else "VFX previews"
-
     @classmethod
     def load(cls) -> "Environment":
         required = ("ROBLOX_API_KEY", "GITHUB_TOKEN", "GITHUB_REPOSITORY", "GITHUB_SHA")
@@ -234,6 +270,7 @@ class Environment:
 
 @dataclass(frozen=True, slots=True)
 class PagePlan:
+    source_key: str
     category: str
     category_slug: str
     page_number: int
@@ -313,9 +350,15 @@ def sanitize_category(category: str) -> str:
     return f"{slug}-{suffix}"
 
 
-def page_hash(config: BuilderConfig, category: str, items: Iterable[VFXItem]) -> str:
+def page_hash(
+    config: BuilderConfig,
+    source: SourceSpec,
+    category: str,
+    items: Iterable[VFXItem],
+) -> str:
     payload = {
-        "source": SOURCE_KEY,
+        "source": source.key,
+        "source_parser_sha256": source.parser_sha256,
         "category": category,
         "render": config.render_fingerprint(),
         "items": [
@@ -454,20 +497,6 @@ def _texture_label_lines(
     return ("Texture ID:", str(asset_id))
 
 
-def _draw_spark_icon(
-    draw: ImageDraw.ImageDraw,
-    x: int,
-    y: int,
-    *,
-    color: tuple[int, int, int, int],
-    accent: tuple[int, int, int, int],
-) -> None:
-    points = [(x + 7, y), (x + 10, y + 7), (x + 17, y + 10), (x + 10, y + 13), (x + 7, y + 20), (x + 4, y + 13), (x - 3, y + 10), (x + 4, y + 7)]
-    draw.polygon(points, fill=color)
-    draw.ellipse((x + 17, y + 3, x + 21, y + 7), fill=accent)
-    draw.ellipse((x + 13, y + 15, x + 16, y + 18), fill=accent)
-
-
 def _draw_texture_icon(
     draw: ImageDraw.ImageDraw,
     x: int,
@@ -585,7 +614,6 @@ def _build_static_page(
     decoded: list[DecodedSlot],
     config: BuilderConfig,
     *,
-    page_title: str,
     page_indicator: str,
 ) -> PreparedPage:
     width, height, content_size = geometry(config)
@@ -594,7 +622,6 @@ def _build_static_page(
     draw = ImageDraw.Draw(canvas)
 
     title_font = _font(17)
-    page_font = _font(16)
     label_font = _font(14)
     placeholder_font = _font(15)
     dash_font = _font(18)
@@ -609,9 +636,7 @@ def _build_static_page(
     preview_fill = (0, 0, 0, 255)
     text_fill = (239, 242, 247, 255)
     muted_fill = (176, 184, 197, 255)
-    accent_fill = (180, 163, 255, 255)
     accent_dim = (128, 145, 255, 255)
-    pill_fill = (26, 31, 40, 255)
     placeholder_fill = (11, 13, 18, 255)
 
     draw.rectangle((0, 0, width, height), fill=background_fill)
@@ -759,7 +784,6 @@ def render_page_gif(
     prepared = _build_static_page(
         decoded,
         config,
-        page_title="VFX Studio Previews",
         page_indicator=f"{plan.page_number}/{plan.category_page_count}",
     )
     try:
@@ -833,10 +857,12 @@ def render_page_gif(
 class GitHubReleaseStore:
     """Armazena previews como assets de uma GitHub Release pública."""
 
-    def __init__(self, env: Environment) -> None:
+    def __init__(self, env: Environment, source: SourceSpec) -> None:
         self.env = env
+        self.source = source
         self.repository = env.github_repository
-        self.release_tag = env.release_tag
+        self.release_tag = source.release_tag(env.mode)
+        self.release_name = source.release_name(env.mode)
         self.release_id: int | None = None
         self.assets: dict[str, dict[str, Any]] = {}
         self.session: aiohttp.ClientSession | None = None
@@ -959,7 +985,7 @@ class GitHubReleaseStore:
                 json_body={
                     "tag_name": self.release_tag,
                     "target_commitish": self.env.github_sha,
-                    "name": self.env.release_name,
+                    "name": self.release_name,
                     "body": (
                         "Arquivos gerados automaticamente pelo VFX Preview Builder. "
                         "Não edite os assets manualmente."
@@ -1397,34 +1423,46 @@ class RobloxAssetClient:
                 return DownloadSlot(item, None, "preview indisponível")
 
 
-async def download_catalog(config: BuilderConfig) -> VFXCatalog:
-    """Baixa somente o JSON público; nenhum secret é usado nesta requisição."""
+async def download_catalog(config: BuilderConfig, source: SourceSpec) -> VFXCatalog:
+    """Baixa o catálogo público da fonte; nenhum secret é usado aqui."""
 
     timeout = aiohttp.ClientTimeout(total=config.catalog_timeout_seconds)
     connector = aiohttp.TCPConnector(limit=2, limit_per_host=2)
     try:
         async with aiohttp.ClientSession(
             connector=connector,
-            headers={"User-Agent": "VFX Preview Builder/1.0"},
+            headers={"User-Agent": "VFX Preview Builder/1.5"},
         ) as session:
             async with session.get(
-                config.catalog_url,
-                headers={"Accept": "application/json"},
+                source.catalog_url,
+                headers={"Accept": "application/json,text/plain;q=0.9,*/*;q=0.5"},
                 timeout=timeout,
             ) as response:
                 if response.status != 200:
-                    raise NetworkError(f"VFXData.json respondeu HTTP {response.status}.")
+                    raise NetworkError(
+                        f"O catálogo de {source.name} respondeu HTTP {response.status}."
+                    )
                 raw = await response.read()
     except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-        raise NetworkError("Não foi possível baixar VFXData.json.") from error
-    if len(raw) > 5 * 1024 * 1024:
-        raise InvalidCatalogError("VFXData.json ultrapassou o limite de segurança.")
-    return parse_catalog_bytes(raw)
+        raise NetworkError(
+            f"Não foi possível baixar o catálogo de {source.name}."
+        ) from error
+    if len(raw) > 10 * 1024 * 1024:
+        raise InvalidCatalogError(
+            f"O catálogo de {source.name} ultrapassou o limite de segurança."
+        )
+    return source.parse_catalog_bytes(raw)
 
 
-def build_page_plans(config: BuilderConfig, catalog: VFXCatalog, mode: str, test_limit: int) -> list[PagePlan]:
+def build_page_plans(
+    config: BuilderConfig,
+    source: SourceSpec,
+    catalog: VFXCatalog,
+    mode: str,
+    test_limit: int,
+) -> list[PagePlan]:
     plans: list[PagePlan] = []
-    prefix = "vfx-studio/test" if mode == "test" else "vfx-studio"
+    prefix = f"{source.key}/test" if mode == "test" else source.key
 
     for category, items in catalog.categories.items():
         slug = sanitize_category(category)
@@ -1432,12 +1470,14 @@ def build_page_plans(config: BuilderConfig, catalog: VFXCatalog, mode: str, test
         for page_index in range(page_count):
             start = page_index * config.items_per_page
             page_items = items[start : start + config.items_per_page]
-            digest = page_hash(config, category, page_items)
+            digest = page_hash(config, source, category, page_items)
             logical_path = (
-                f"{prefix}/pages/{slug}/{page_index + 1:03d}-{digest.removeprefix('sha256-')[:20]}.gif"
+                f"{prefix}/pages/{slug}/{page_index + 1:03d}-"
+                f"{digest.removeprefix('sha256-')[:20]}.gif"
             )
             plans.append(
                 PagePlan(
+                    source_key=source.key,
                     category=category,
                     category_slug=slug,
                     page_number=page_index + 1,
@@ -1538,6 +1578,8 @@ def make_page_manifest_entry(
 def build_manifest(
     config: BuilderConfig,
     env: Environment,
+    source: SourceSpec,
+    store: GitHubReleaseStore,
     catalog: VFXCatalog,
     page_entries: list[tuple[PagePlan, dict[str, Any]]],
     stats: BuildStats,
@@ -1566,19 +1608,17 @@ def build_manifest(
         "hosting": {
             "provider": "github-releases",
             "repository": env.github_repository,
-            "release_tag": env.release_tag,
-            "release_url": (
-                f"https://github.com/{env.github_repository}/releases/tag/"
-                f"{quote(env.release_tag, safe='')}"
-            ),
+            "release_tag": store.release_tag,
+            "release_url": store.release_url,
             "asset_urls_are_immutable": True,
         },
         "source": {
-            "key": SOURCE_KEY,
-            "name": SOURCE_NAME,
+            "key": source.key,
+            "name": source.name,
             "catalog_version": catalog.catalog_version,
-            "catalog_url": config.catalog_url,
+            "catalog_url": source.catalog_url,
             "catalog_total_unique_flipbooks": catalog.total_unique_flipbooks,
+            "parser_sha256": source.parser_sha256,
         },
         "generator": {
             "version": config.generator_version,
@@ -1654,6 +1694,7 @@ def _format_bytes(value: float | int) -> str:
 
 
 def summary_markdown(
+    source_name: str,
     stats: BuildStats,
     elapsed: float,
     manifest_published: bool,
@@ -1669,7 +1710,7 @@ def summary_markdown(
     average_seconds = statistics.fmean(durations) if durations else 0
 
     lines = [
-        "## VFX Preview Builder",
+        f"## VFX Preview Builder — {source_name}",
         "",
         f"- Páginas analisadas: **{stats.pages_analyzed}**",
         f"- Páginas reaproveitadas: **{stats.pages_reused}**",
@@ -1700,21 +1741,31 @@ def publish_summary(markdown: str) -> None:
             handle.write("\n")
 
 
-async def run_build() -> int:
+async def run_source_build(
+    config: BuilderConfig,
+    env: Environment,
+    source: SourceSpec,
+) -> bool:
     started = time.monotonic()
-    config = BuilderConfig.load()
-    env = Environment.load()
-
-    LOGGER.info("Carregando catálogo público do VFX Studio.")
-    catalog = await download_catalog(config)
-    plans = build_page_plans(config, catalog, env.mode, env.test_page_limit)
+    LOGGER.info("Carregando catálogo público de %s.", source.name)
+    catalog = await download_catalog(config, source)
+    plans = build_page_plans(config, source, catalog, env.mode, env.test_page_limit)
     LOGGER.info(
-        "Catálogo %s: %s flipbooks únicos; %s páginas selecionadas para modo %s.",
+        "%s catálogo %s: %s flipbooks únicos; %s páginas selecionadas para modo %s.",
+        source.name,
         catalog.catalog_version,
         catalog.total_unique_flipbooks,
         len(plans),
         env.mode,
     )
+
+    if not plans:
+        raise InvalidCatalogError(f"{source.name} não produziu nenhuma página de flipbooks.")
+    if len(plans) + 1 > GITHUB_RELEASE_ASSET_HARD_LIMIT:
+        raise BuilderError(
+            f"{source.name} produziria {len(plans)} páginas e ultrapassaria o limite "
+            f"de {GITHUB_RELEASE_ASSET_HARD_LIMIT} assets por Release do GitHub."
+        )
 
     stats = BuildStats()
     page_entries: list[tuple[PagePlan, dict[str, Any]]] = []
@@ -1722,19 +1773,23 @@ async def run_build() -> int:
     manifest_url: str | None = None
     release_url: str | None = None
 
-    async with GitHubReleaseStore(env) as store:
+    async with GitHubReleaseStore(env, source) as store:
         release_url = store.release_url
         previous_manifest_name, previous_manifest = await store.get_latest_manifest()
         previous_index = previous_page_index(previous_manifest)
 
-        # Limpa somente sobras antigas do próprio builder. O manifest anterior é o
-        # índice de verdade; não fazemos uma consulta HTTP individual por página.
+        # Cada fonte usa sua própria Release. Assim a limpeza incremental nunca
+        # remove assets da outra biblioteca e o limite de 1000 assets não é somado.
         previous_keep = manifest_asset_names(previous_manifest)
         if previous_manifest_name:
             previous_keep.add(previous_manifest_name)
         removed_before = await store.cleanup_builder_assets(previous_keep)
         if removed_before:
-            LOGGER.info("Removidos %s assets antigos antes da geração.", removed_before)
+            LOGGER.info(
+                "%s: removidos %s assets antigos antes da geração.",
+                source.name,
+                removed_before,
+            )
         existing_asset_names = set(store.assets)
 
         async with RobloxAssetClient(env, config) as roblox:
@@ -1778,7 +1833,12 @@ async def run_build() -> int:
                         significant_failure=False,
                     )
                     page_entries.append((plan, entry))
-                    LOGGER.info("Reaproveitando %s página %s.", plan.category, plan.page_number)
+                    LOGGER.info(
+                        "%s: reaproveitando %s página %s.",
+                        source.name,
+                        plan.category,
+                        plan.page_number,
+                    )
                     continue
 
                 page_started = time.monotonic()
@@ -1806,7 +1866,8 @@ async def run_build() -> int:
                         )
                         if significant_failure:
                             LOGGER.warning(
-                                "Página %s/%s teve %s de %s assets sem preview.",
+                                "%s %s/%s teve %s de %s assets sem preview.",
+                                source.name,
                                 plan.category,
                                 plan.page_number,
                                 failed_count,
@@ -1814,7 +1875,8 @@ async def run_build() -> int:
                             )
                         if render.size_bytes >= config.large_gif_warning_bytes:
                             LOGGER.warning(
-                                "Página %s/%s gerou GIF grande: %s bytes.",
+                                "%s %s/%s gerou GIF grande: %s bytes.",
+                                source.name,
                                 plan.category,
                                 plan.page_number,
                                 render.size_bytes,
@@ -1844,7 +1906,8 @@ async def run_build() -> int:
                         )
                         page_entries.append((plan, entry))
                         LOGGER.info(
-                            "Gerada %s página %s: %s bytes, %s falhas individuais.",
+                            "%s: gerada %s página %s: %s bytes, %s falhas individuais.",
+                            source.name,
                             plan.category,
                             plan.page_number,
                             render.size_bytes,
@@ -1855,15 +1918,22 @@ async def run_build() -> int:
                 except Exception:
                     stats.pages_failed += 1
                     LOGGER.exception(
-                        "Falha completa ao gerar/enviar %s página %s.",
+                        "%s: falha completa ao gerar/enviar %s página %s.",
+                        source.name,
                         plan.category,
                         plan.page_number,
                     )
 
         if stats.pages_failed == 0 and len(page_entries) == len(plans):
-            manifest = build_manifest(config, env, catalog, page_entries, stats)
-            # Todas as páginas já existem na Release antes de o novo manifest ser
-            # publicado. O manifest também ganha nome imutável baseado nos bytes.
+            manifest = build_manifest(
+                config,
+                env,
+                source,
+                store,
+                catalog,
+                page_entries,
+                stats,
+            )
             manifest_name, manifest_url, manifest_bytes = await store.upload_manifest(
                 manifest,
                 env.mode,
@@ -1871,22 +1941,31 @@ async def run_build() -> int:
             stats.bytes_uploaded += manifest_bytes
             manifest_published = True
 
-            # Só depois do manifest válido existir removemos páginas/manifests velhos.
             keep_names = manifest_asset_names(manifest)
             keep_names.add(manifest_name)
             removed_after = await store.cleanup_builder_assets(keep_names)
             if removed_after:
-                LOGGER.info("Removidos %s assets antigos após publicar o manifest.", removed_after)
-            LOGGER.info("Manifest publicado com segurança em GitHub Releases: %s", manifest_url)
+                LOGGER.info(
+                    "%s: removidos %s assets antigos após publicar o manifest.",
+                    source.name,
+                    removed_after,
+                )
+            LOGGER.info(
+                "%s: manifest publicado com segurança em GitHub Releases: %s",
+                source.name,
+                manifest_url,
+            )
         else:
             LOGGER.error(
-                "O manifest NÃO foi publicado porque houve %s falhas completas de página.",
+                "%s: o manifest NÃO foi publicado porque houve %s falhas completas de página.",
+                source.name,
                 stats.pages_failed,
             )
 
     elapsed = time.monotonic() - started
     publish_summary(
         summary_markdown(
+            source.name,
             stats,
             elapsed,
             manifest_published,
@@ -1894,8 +1973,30 @@ async def run_build() -> int:
             manifest_url=manifest_url,
         )
     )
-    return 0 if manifest_published else 1
+    return manifest_published
 
+
+async def run_build() -> int:
+    config = BuilderConfig.load()
+    env = Environment.load()
+
+    requested_source = os.getenv("BUILD_SOURCE", "").strip()
+    if requested_source:
+        if requested_source not in config.enabled_sources:
+            raise MissingConfigurationError(
+                f"BUILD_SOURCE={requested_source!r} não está habilitada em preview_config.json."
+            )
+        source_keys = [requested_source]
+    else:
+        # Execução local sem BUILD_SOURCE continua capaz de processar todas as fontes.
+        source_keys = list(config.enabled_sources)
+
+    results: list[bool] = []
+    for source_key in source_keys:
+        source = SOURCE_SPECS_BY_KEY[source_key]
+        results.append(await run_source_build(config, env, source))
+
+    return 0 if results and all(results) else 1
 
 def main() -> int:
     logging.basicConfig(

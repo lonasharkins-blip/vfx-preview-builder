@@ -12,6 +12,7 @@ from generator import (
     BuilderConfig,
     DownloadSlot,
     PagePlan,
+    SOURCE_SPECS_BY_KEY,
     adaptive_fps,
     build_page_plans,
     can_reuse_page,
@@ -26,12 +27,15 @@ from generator import (
     sanitize_category,
 )
 from sources.vfx_studio import VFXItem, parse_catalog_bytes
+from sources.zonito_visuals import parse_catalog_bytes as parse_zonito_catalog_bytes
 
 
 class BuilderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.config = BuilderConfig.load()
+        cls.vfx_source = SOURCE_SPECS_BY_KEY["vfx-studio"]
+        cls.zonito_source = SOURCE_SPECS_BY_KEY["zonito-visuals"]
 
     def _item(self, asset_id: int, grid: int, category: str = "Fire") -> VFXItem:
         return VFXItem(
@@ -81,6 +85,82 @@ class BuilderTests(unittest.TestCase):
         catalog = parse_catalog_bytes(json.dumps(payload).encode())
         self.assertEqual(list(catalog.categories), ["Smoke", "Fire", "AAA New"])
 
+    def test_zonito_parser_keeps_flipbooks_and_ignores_statics(self) -> None:
+        payload = {
+            "Textures": {
+                "Blue Slash": {
+                    "Texture": "rbxassetid://101",
+                    "Type": "2x2",
+                    "Tags": ["Slashes", "Flipbook"],
+                    "Resolution": 512,
+                },
+                "Smoke Loop": {
+                    "Texture": 102,
+                    "Type": "4X4",
+                    "Tags": ["Smoke"],
+                },
+                "Big Impact": {
+                    "Texture": "103",
+                    "Type": "8×8",
+                    "Tags": [],
+                },
+                "Static Spark": {
+                    "Texture": 104,
+                    "Type": "Static",
+                    "Tags": ["Star"],
+                },
+            }
+        }
+        catalog = parse_zonito_catalog_bytes(json.dumps(payload).encode())
+        self.assertEqual(catalog.total_unique_flipbooks, 3)
+        self.assertEqual([item.asset_id for item in catalog.categories["Smoke"]], [102])
+        self.assertEqual([item.asset_id for item in catalog.categories["Slashes"]], [101])
+        self.assertEqual([item.asset_id for item in catalog.categories["Other"]], [103])
+        all_ids = {item.asset_id for items in catalog.categories.values() for item in items}
+        self.assertNotIn(104, all_ids)
+
+    def test_zonito_page_plans_use_own_source_prefix(self) -> None:
+        payload = {
+            "Textures": {
+                f"Effect {index:02d}": {
+                    "Texture": f"rbxassetid://{1000 + index}",
+                    "Type": "4x4",
+                    "Tags": ["Fire"],
+                }
+                for index in range(1, 9)
+            }
+        }
+        catalog = parse_zonito_catalog_bytes(json.dumps(payload).encode())
+        plans = build_page_plans(
+            self.config,
+            self.zonito_source,
+            catalog,
+            "test",
+            1,
+        )
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0].source_key, "zonito-visuals")
+        self.assertTrue(plans[0].logical_path.startswith("zonito-visuals/test/pages/"))
+        self.assertEqual(len(plans[0].items), 6)
+
+    def test_sources_use_separate_releases(self) -> None:
+        self.assertEqual(self.vfx_source.release_tag("test"), "vfx-previews-test")
+        self.assertEqual(self.vfx_source.release_tag("full"), "vfx-previews")
+        self.assertEqual(
+            self.zonito_source.release_tag("test"),
+            "vfx-previews-zonito-test",
+        )
+        self.assertEqual(
+            self.zonito_source.release_tag("full"),
+            "vfx-previews-zonito",
+        )
+
+    def test_enabled_sources_include_both_plugins(self) -> None:
+        self.assertEqual(
+            self.config.enabled_sources,
+            ["vfx-studio", "zonito-visuals"],
+        )
+
     def test_safe_category_never_contains_path_segments(self) -> None:
         slug = sanitize_category("../../Fogo / Água ⚡")
         self.assertNotIn("..", slug)
@@ -89,11 +169,15 @@ class BuilderTests(unittest.TestCase):
 
     def test_page_hash_is_deterministic_and_config_sensitive(self) -> None:
         items = (self._item(1, 2), self._item(2, 4))
-        first = page_hash(self.config, "Fire", items)
-        second = page_hash(self.config, "Fire", items)
+        first = page_hash(self.config, self.vfx_source, "Fire", items)
+        second = page_hash(self.config, self.vfx_source, "Fire", items)
         self.assertEqual(first, second)
         changed = (self._item(1, 2), self._item(2, 8))
-        self.assertNotEqual(first, page_hash(self.config, "Fire", changed))
+        self.assertNotEqual(first, page_hash(self.config, self.vfx_source, "Fire", changed))
+        self.assertNotEqual(
+            first,
+            page_hash(self.config, self.zonito_source, "Fire", items),
+        )
 
 
     def test_render_fingerprint_tracks_generator_source(self) -> None:
@@ -123,7 +207,7 @@ class BuilderTests(unittest.TestCase):
                 "Grid": 2,
             }
         catalog = parse_catalog_bytes(json.dumps(payload).encode())
-        plans = build_page_plans(self.config, catalog, "test", 2)
+        plans = build_page_plans(self.config, self.vfx_source, catalog, "test", 2)
         self.assertEqual(len(plans), 2)
         self.assertEqual(len(plans[0].items), 6)
         self.assertEqual(len(plans[1].items), 6)
@@ -161,14 +245,14 @@ class BuilderTests(unittest.TestCase):
                 "Grid": 2,
             }
         catalog = parse_catalog_bytes(json.dumps(payload).encode())
-        plans = build_page_plans(self.config, catalog, "full", 2)
+        plans = build_page_plans(self.config, self.vfx_source, catalog, "full", 2)
         self.assertEqual([len(plan.items) for plan in plans], [6, 6, 6, 6, 5])
 
     def test_incremental_reuses_clean_page_but_retries_failed_page(self) -> None:
         item = self._item(1, 2)
-        digest = page_hash(self.config, "Fire", (item,))
+        digest = page_hash(self.config, self.vfx_source, "Fire", (item,))
         plan = PagePlan(
-            "Fire", sanitize_category("Fire"), 1, 1, (item,), digest,
+            "vfx-studio", "Fire", sanitize_category("Fire"), 1, 1, (item,), digest,
             "vfx-studio/pages/fire/001.gif",
         )
         previous = {
@@ -187,9 +271,9 @@ class BuilderTests(unittest.TestCase):
 
     def test_release_asset_name_is_flat_safe_and_content_versioned(self) -> None:
         item = self._item(7, 4, "Fire / Magic")
-        digest = page_hash(self.config, item.category, (item,))
+        digest = page_hash(self.config, self.vfx_source, item.category, (item,))
         plan = PagePlan(
-            item.category, sanitize_category(item.category), 3, 9, (item,), digest,
+            "vfx-studio", item.category, sanitize_category(item.category), 3, 9, (item,), digest,
             "vfx-studio/pages/fire/003.gif",
         )
         first = release_asset_name(plan, "sha256-" + "a" * 64)
@@ -234,8 +318,8 @@ class BuilderTests(unittest.TestCase):
             slot = DownloadSlot(item, path)
             output = root / "stable-colors.gif"
             plan = PagePlan(
-                "Fire", sanitize_category("Fire"), 1, 1, (item,),
-                page_hash(self.config, "Fire", (item,)),
+                "vfx-studio", "Fire", sanitize_category("Fire"), 1, 1, (item,),
+                page_hash(self.config, self.vfx_source, "Fire", (item,)),
                 "vfx-studio/test/pages/fire/001.gif",
             )
             render_page_gif(plan, [slot], output, self.config)
@@ -277,7 +361,7 @@ class BuilderTests(unittest.TestCase):
                 card_header_height=30, preview_height=88,
                 content_padding=4, gap=4, margin=4,
             )
-            plan = PagePlan("Fire", sanitize_category("Fire"), 1, 1, tuple(slot.item for slot in slots), page_hash(render_config, "Fire", tuple(slot.item for slot in slots)), "vfx-studio/test/pages/fire/001.gif")
+            plan = PagePlan("vfx-studio", "Fire", sanitize_category("Fire"), 1, 1, tuple(slot.item for slot in slots), page_hash(render_config, self.vfx_source, "Fire", tuple(slot.item for slot in slots)), "vfx-studio/test/pages/fire/001.gif")
             result = render_page_gif(plan, slots, output, render_config)
             self.assertTrue(output.is_file())
             self.assertEqual(result.failed_asset_ids, (4,))

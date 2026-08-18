@@ -4,7 +4,7 @@ name: Generate VFX previews
   workflow_dispatch:
     inputs:
       mode:
-        description: "test gera só 1–2 páginas; full gera toda a biblioteca"
+        description: "test gera 1–2 páginas de cada fonte; full gera as duas bibliotecas"
         required: true
         default: test
         type: choice
@@ -12,7 +12,7 @@ name: Generate VFX previews
           - test
           - full
       test_pages:
-        description: "Quantidade de páginas no modo test"
+        description: "Páginas por fonte no modo test"
         required: true
         default: "1"
         type: choice
@@ -30,8 +30,15 @@ concurrency:
 
 jobs:
   build:
+    name: Build ${{ matrix.source }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        source:
+          - vfx-studio
+          - zonito-visuals
 
     env:
       PYTHONUNBUFFERED: "1"
@@ -39,6 +46,7 @@ jobs:
       TEST_PAGE_LIMIT: ${{ inputs.test_pages }}
       ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
+      BUILD_SOURCE: ${{ matrix.source }}
 
     steps:
       - name: Checkout

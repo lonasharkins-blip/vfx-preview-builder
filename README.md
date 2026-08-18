@@ -13,7 +13,7 @@ GitHub Actions
 ↓
 Python + Pillow
 ↓
-GIFs compostos 2×6
+GIFs compostos 2×3
 ↓
 GitHub Release pública
 ↓
@@ -24,7 +24,7 @@ Não usa Cloudflare R2, cartão, boto3, cookies Roblox ou `.ROBLOSECURITY`.
 
 ## O que é gerado
 
-Cada página contém até **12 flipbooks**, em **2 colunas × 6 linhas**.
+Cada página contém até **6 flipbooks**, em **2 colunas × 3 linhas**.
 
 Cada célula mantém:
 
@@ -33,13 +33,19 @@ Texture ID
 [preview animado]
 ```
 
-A configuração atual mantém células de 240 px, resultando em uma composição de aproximadamente **514 × 1718 px**.
+A versão atual usa um layout de galeria em tema escuro, com cabeçalho discreto, cards arredondados e IDs desenhados de forma que não sejam cortados.
+
+Medidas atuais do layout:
+
+- **2 colunas × 3 linhas**;
+- **696 × 958 px** por página;
+- cards com **326 px de largura**;
+- cabeçalho do card separado da área preta do preview.
 
 O builder preserva:
 
 - grids 2×2, 4×4 e 8×8;
 - ordem dos frames linha → coluna;
-- transparência de GIF;
 - proporção do efeito;
 - placeholder individual quando um asset falha;
 - velocidade adaptativa de 12 / 20 / 30 FPS;
@@ -92,7 +98,7 @@ O manifest inclui, entre outros dados:
 - configuração/versão do gerador;
 - categoria;
 - quantidade de itens e páginas;
-- 12 itens por página;
+- 6 itens por página;
 - Asset IDs de cada página;
 - hash lógico da página;
 - hash real do GIF;
@@ -234,7 +240,16 @@ Ela deve conter pelo menos:
 - um `page--....gif`;
 - um `manifest--test--....json`.
 
-Abra o GIF pelo navegador. Se ele carregar e animar, a prova de arquitetura foi concluída:
+Abra o GIF pelo navegador e confira principalmente:
+
+- cabeçalho da página;
+- indicador `X/Y`;
+- cards arredondados;
+- IDs sem corte;
+- animação dos 6 VFX;
+- placeholders quando houver falha individual.
+
+Se o GIF carregar e animar, a prova de arquitetura foi concluída:
 
 ```text
 GitHub Actions → Roblox → Pillow → GitHub Releases → HTTPS
@@ -275,7 +290,7 @@ GitHub Releases aceita até 1000 assets por Release e arquivos individuais abaix
 
 Uma mudança no conteúdo binário de uma textura Roblox que mantenha exatamente o mesmo Asset ID e os mesmos metadados do catálogo pode não ser detectada por uma página já considerada limpa, pois detectar isso exigiria baixar novamente todos os assets e eliminaria boa parte do benefício incremental.
 
-GIF possui transparência binária, não alpha parcial real. O threshold fica em `preview_config.json`.
+Os efeitos continuam respeitando alpha internamente, mas a galeria final agora usa **fundo escuro/área de preview preta** para melhor legibilidade, aparência no Discord e compressão do GIF.
 
 ## Testes locais
 

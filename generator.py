@@ -85,8 +85,10 @@ class BuilderConfig:
     items_per_page: int
     columns: int
     rows: int
-    cell_size: int
-    header_height: int
+    page_header_height: int
+    card_width: int
+    card_header_height: int
+    preview_height: int
     content_padding: int
     gap: int
     margin: int
@@ -125,8 +127,16 @@ class BuilderConfig:
             raise MissingConfigurationError("Esta versão aceita somente VFX Studio.")
         if self.items_per_page != self.columns * self.rows:
             raise MissingConfigurationError("items_per_page precisa coincidir com columns × rows.")
-        if (self.items_per_page, self.columns, self.rows) != (12, 2, 6):
-            raise MissingConfigurationError("A primeira versão deve usar exatamente 12 itens em 2×6.")
+        if (self.items_per_page, self.columns, self.rows) != (6, 2, 3):
+            raise MissingConfigurationError("A configuração atual deve usar exatamente 6 itens em 2×3.")
+        if self.page_header_height < 24:
+            raise MissingConfigurationError("page_header_height inválido.")
+        if self.card_width < 120:
+            raise MissingConfigurationError("card_width inválido.")
+        if self.card_header_height < 24:
+            raise MissingConfigurationError("card_header_height inválido.")
+        if self.preview_height < 120:
+            raise MissingConfigurationError("preview_height inválido.")
         if self.max_output_frames < 1 or self.max_output_frames > 64:
             raise MissingConfigurationError("max_output_frames deve ficar entre 1 e 64.")
         if not (2 <= self.gif_palette_colors <= 255):
@@ -146,8 +156,10 @@ class BuilderConfig:
             "items_per_page": self.items_per_page,
             "columns": self.columns,
             "rows": self.rows,
-            "cell_size": self.cell_size,
-            "header_height": self.header_height,
+            "page_header_height": self.page_header_height,
+            "card_width": self.card_width,
+            "card_header_height": self.card_header_height,
+            "preview_height": self.preview_height,
             "content_padding": self.content_padding,
             "gap": self.gap,
             "margin": self.margin,
@@ -220,6 +232,7 @@ class PagePlan:
     category: str
     category_slug: str
     page_number: int
+    category_page_count: int
     items: tuple[VFXItem, ...]
     page_hash: str
     logical_path: str
@@ -332,23 +345,35 @@ def release_asset_name(plan: PagePlan, content_hash: str) -> str:
     )
 
 
+def content_square_size(config: BuilderConfig) -> int:
+    return max(1, min(
+        config.card_width - config.content_padding * 2,
+        config.preview_height - config.content_padding * 2,
+    ))
+
+
+def card_height(config: BuilderConfig) -> int:
+    return config.card_header_height + config.preview_height
+
+
 def geometry(config: BuilderConfig) -> tuple[int, int, int]:
     width = (
         config.margin * 2
-        + config.columns * config.cell_size
+        + config.columns * config.card_width
         + (config.columns - 1) * config.gap
     )
     height = (
         config.margin * 2
-        + config.rows * (config.header_height + config.cell_size)
+        + config.page_header_height
+        + config.gap
+        + config.rows * card_height(config)
         + (config.rows - 1) * config.gap
     )
-    content_size = config.cell_size - config.content_padding * 2
-    return width, height, content_size
+    return width, height, content_square_size(config)
 
 
 def adaptive_fps(config: BuilderConfig, largest_frame_count: int) -> int:
-    """Mesma regra 12/20/30 FPS atualmente usada pelo bot."""
+    """Mesma regra adaptativa 12/20/30 FPS usada pelo bot."""
 
     if largest_frame_count >= 64:
         return config.fps_64_frames
@@ -398,6 +423,61 @@ def _centered_text(
     draw.text((x, y), text, font=font, fill=fill)
 
 
+def _text_size(font: ImageFont.ImageFont, text: str) -> tuple[int, int]:
+    left, top, right, bottom = font.getbbox(text)
+    return right - left, bottom - top
+
+
+def _left_text(
+    draw: ImageDraw.ImageDraw,
+    position: tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int, int],
+) -> None:
+    draw.text(position, text, font=font, fill=fill)
+
+
+def _texture_label_lines(
+    asset_id: int,
+    max_width: int,
+    label_font: ImageFont.ImageFont,
+) -> tuple[str, ...]:
+    single = f"Texture ID: {asset_id}"
+    if _text_size(label_font, single)[0] <= max_width:
+        return (single,)
+    return ("Texture ID:", str(asset_id))
+
+
+def _draw_spark_icon(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    *,
+    color: tuple[int, int, int, int],
+    accent: tuple[int, int, int, int],
+) -> None:
+    points = [(x + 7, y), (x + 10, y + 7), (x + 17, y + 10), (x + 10, y + 13), (x + 7, y + 20), (x + 4, y + 13), (x - 3, y + 10), (x + 4, y + 7)]
+    draw.polygon(points, fill=color)
+    draw.ellipse((x + 17, y + 3, x + 21, y + 7), fill=accent)
+    draw.ellipse((x + 13, y + 15, x + 16, y + 18), fill=accent)
+
+
+def _draw_texture_icon(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    *,
+    color: tuple[int, int, int, int],
+) -> None:
+    top = [(x + 8, y), (x + 16, y + 4), (x + 8, y + 8), (x, y + 4)]
+    left = [(x, y + 4), (x + 8, y + 8), (x + 8, y + 17), (x, y + 13)]
+    right = [(x + 8, y + 8), (x + 16, y + 4), (x + 16, y + 13), (x + 8, y + 17)]
+    draw.polygon(top, outline=color)
+    draw.polygon(left, outline=color)
+    draw.polygon(right, outline=color)
+
+
 def _validate_source_image(image: Image.Image, item: VFXItem, config: BuilderConfig) -> None:
     image_format = (image.format or "").upper()
     if image_format not in SUPPORTED_IMAGE_FORMATS:
@@ -418,7 +498,7 @@ def _validate_source_image(image: Image.Image, item: VFXItem, config: BuilderCon
 
 
 def _frame_to_transparent_canvas(frame: Image.Image, size: int) -> Image.Image:
-    """Redimensiona preservando alpha em vez de achatar o efeito em preto."""
+    """Preserva alpha do frame; a composição final decide o fundo."""
 
     rgba = frame.convert("RGBA")
     try:
@@ -454,21 +534,13 @@ def decode_slot(slot: DownloadSlot, config: BuilderConfig) -> DecodedSlot:
         try:
             frame_width = spritesheet.width // slot.item.grid
             frame_height = spritesheet.height // slot.item.grid
-            # Preserva a ordem atual do bot: linha por linha, coluna por coluna.
             for row in range(slot.item.grid):
                 for column in range(slot.item.grid):
                     left = column * frame_width
                     top = row * frame_height
-                    cropped = spritesheet.crop(
-                        (left, top, left + frame_width, top + frame_height)
-                    )
+                    cropped = spritesheet.crop((left, top, left + frame_width, top + frame_height))
                     try:
-                        frames.append(
-                            _frame_to_transparent_canvas(
-                                cropped,
-                                config.cell_size - config.content_padding * 2,
-                            )
-                        )
+                        frames.append(_frame_to_transparent_canvas(cropped, content_square_size(config)))
                     finally:
                         cropped.close()
         finally:
@@ -489,108 +561,148 @@ def decode_slot(slot: DownloadSlot, config: BuilderConfig) -> DecodedSlot:
     return DecodedSlot(slot.item, [], failure)
 
 
+@dataclass(frozen=True, slots=True)
+class SlotLayout:
+    preview_box: tuple[int, int, int, int]
+    effect_origin: tuple[int, int]
+
+
+@dataclass(slots=True)
+class PreparedPage:
+    base: Image.Image
+    layouts: list[SlotLayout]
+
+    def close(self) -> None:
+        self.base.close()
+
+
+def _build_static_page(
+    decoded: list[DecodedSlot],
+    config: BuilderConfig,
+    *,
+    page_title: str,
+    page_indicator: str,
+) -> PreparedPage:
+    width, height, content_size = geometry(config)
+    card_total_height = card_height(config)
+    canvas = Image.new("RGBA", (width, height), (10, 12, 16, 255))
+    draw = ImageDraw.Draw(canvas)
+
+    title_font = _font(17)
+    page_font = _font(16)
+    label_font = _font(14)
+    placeholder_font = _font(15)
+    dash_font = _font(18)
+
+    background_fill = (10, 12, 16, 255)
+    outer_fill = (13, 16, 22, 255)
+    outer_border = (52, 60, 74, 255)
+    divider_fill = (42, 48, 60, 255)
+    card_fill = (17, 20, 27, 255)
+    card_border = (61, 70, 86, 255)
+    card_strip = (29, 33, 43, 255)
+    preview_fill = (0, 0, 0, 255)
+    text_fill = (239, 242, 247, 255)
+    muted_fill = (176, 184, 197, 255)
+    accent_fill = (180, 163, 255, 255)
+    accent_dim = (128, 145, 255, 255)
+    pill_fill = (26, 31, 40, 255)
+    placeholder_fill = (11, 13, 18, 255)
+
+    draw.rectangle((0, 0, width, height), fill=background_fill)
+    panel_box = (4, 4, width - 5, height - 5)
+    draw.rounded_rectangle(panel_box, radius=16, fill=outer_fill, outline=outer_border, width=1)
+
+    header_top = 4
+    header_bottom = config.margin + config.page_header_height
+    header_left = config.margin
+    header_right = width - config.margin
+    draw.line((panel_box[0], header_bottom, panel_box[2], header_bottom), fill=divider_fill, width=1)
+    _draw_spark_icon(draw, header_left + 18, header_top + 18, color=text_fill, accent=accent_fill)
+    _left_text(draw, (header_left + 44, header_top + 16), page_title, title_font, text_fill)
+
+    page_text_width, page_text_height = _text_size(page_font, page_indicator)
+    pill_height = 30
+    pill_width = max(54, page_text_width + 26)
+    pill_right = header_right - 2
+    pill_left = pill_right - pill_width
+    pill_top = header_top + 13
+    pill_bottom = pill_top + pill_height
+    draw.rounded_rectangle((pill_left, pill_top, pill_right, pill_bottom), radius=14, fill=pill_fill, outline=outer_border, width=1)
+    _centered_text(draw, (pill_left, pill_top, pill_right, pill_bottom), page_indicator, page_font, muted_fill)
+
+    layouts: list[SlotLayout] = []
+    grid_top = config.margin + config.page_header_height + config.gap
+    for slot_index in range(config.items_per_page):
+        row = slot_index // config.columns
+        column = slot_index % config.columns
+        x = config.margin + column * (config.card_width + config.gap)
+        y = grid_top + row * (card_total_height + config.gap)
+        card_box = (x, y, x + config.card_width - 1, y + card_total_height - 1)
+        draw.rounded_rectangle(card_box, radius=14, fill=card_fill, outline=card_border, width=1)
+
+        strip_box = (x + 1, y + 1, x + config.card_width - 2, y + config.card_header_height - 1)
+        draw.rounded_rectangle(strip_box, radius=13, fill=card_strip)
+        draw.rectangle((x + 1, y + config.card_header_height - 13, x + config.card_width - 2, y + config.card_header_height - 1), fill=card_strip)
+
+        preview_left = x + 1
+        preview_top = y + config.card_header_height
+        preview_right = x + config.card_width - 2
+        preview_bottom = preview_top + config.preview_height - 2
+        draw.rounded_rectangle((preview_left, preview_top, preview_right, preview_bottom), radius=10, fill=preview_fill)
+
+        if slot_index >= len(decoded):
+            _centered_text(draw, (x, y, x + config.card_width, y + card_total_height), "—", dash_font, muted_fill)
+            layouts.append(SlotLayout((preview_left, preview_top, preview_right, preview_bottom), (preview_left, preview_top)))
+            continue
+
+        slot = decoded[slot_index]
+        _draw_texture_icon(draw, x + 16, y + 12, color=accent_dim)
+        label_left = x + 40
+        label_top = y + 10
+        label_width = config.card_width - 54
+        lines = _texture_label_lines(slot.item.asset_id, label_width, label_font)
+        line_height = _text_size(label_font, "Texture ID:")[1]
+        if len(lines) == 1:
+            _left_text(draw, (label_left, y + (config.card_header_height - line_height) // 2 - 1), lines[0], label_font, text_fill)
+        else:
+            _left_text(draw, (label_left, label_top - 1), lines[0], label_font, muted_fill)
+            _left_text(draw, (label_left, label_top + line_height - 1), lines[1], label_font, text_fill)
+
+        effect_left = preview_left + (config.card_width - 2 - content_size) // 2
+        effect_top = preview_top + (config.preview_height - 2 - content_size) // 2
+        layouts.append(SlotLayout((preview_left, preview_top, preview_right, preview_bottom), (effect_left, effect_top)))
+
+        if not slot.frames:
+            inset = 12
+            draw.rounded_rectangle((preview_left + inset, preview_top + inset, preview_right - inset, preview_bottom - inset), radius=8, fill=placeholder_fill, outline=(34, 39, 48, 255), width=1)
+            _centered_text(draw, (preview_left + 16, preview_top + 16, preview_right - 16, preview_bottom - 16), "Prévia indisponível", placeholder_font, muted_fill)
+
+    return PreparedPage(canvas, layouts)
+
+
 def render_rgba_frame(
     decoded: list[DecodedSlot],
     config: BuilderConfig,
     *,
     tick: int,
+    prepared: PreparedPage,
 ) -> Image.Image:
-    width, height, content_size = geometry(config)
-    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    header_font = _font(18)
-    status_font = _font(16)
-
-    header_fill = (233, 229, 230, 255)
-    muted_fill = (168, 168, 168, 255)
-    border_fill = (52, 52, 52, 255)
-    header_background = (8, 8, 8, 255)
-    placeholder_background = (8, 8, 8, 220)
-
-    for slot_index in range(config.items_per_page):
-        row = slot_index // config.columns
-        column = slot_index % config.columns
-        x = config.margin + column * (config.cell_size + config.gap)
-        y = config.margin + row * (
-            config.header_height + config.cell_size + config.gap
-        )
-
-        # O cabeçalho é opaco para o ID permanecer legível em qualquer tema.
-        draw.rectangle(
-            (x, y, x + config.cell_size - 1, y + config.header_height - 1),
-            fill=header_background,
-            outline=border_fill,
-            width=1,
-        )
-        # A área do efeito fica transparente; só a borda é desenhada.
-        media_top = y + config.header_height
-        draw.rectangle(
-            (
-                x,
-                media_top,
-                x + config.cell_size - 1,
-                media_top + config.cell_size - 1,
-            ),
-            outline=border_fill,
-            width=1,
-        )
-
-        if slot_index >= len(decoded):
-            _centered_text(
-                draw,
-                (x, y, x + config.cell_size, media_top + config.cell_size),
-                "—",
-                status_font,
-                muted_fill,
-            )
+    _width, _height, content_size = geometry(config)
+    canvas = prepared.base.copy()
+    for slot_index, slot in enumerate(decoded):
+        if not slot.frames:
             continue
-
-        slot = decoded[slot_index]
-        _centered_text(
-            draw,
-            (x + 3, y, x + config.cell_size - 3, y + config.header_height),
-            f"Texture ID: {slot.item.asset_id}",
-            header_font,
-            header_fill,
-        )
-
-        if slot.frames:
-            source_frame = slot.frames[tick % len(slot.frames)]
-            if source_frame.size != (content_size, content_size):
-                effect_frame = source_frame.resize(
-                    (content_size, content_size),
-                    Image.Resampling.LANCZOS,
-                )
-            else:
-                effect_frame = source_frame
-            left = x + (config.cell_size - content_size) // 2
-            top = media_top + (config.cell_size - content_size) // 2
-            canvas.alpha_composite(effect_frame, (left, top))
+        source_frame = slot.frames[tick % len(slot.frames)]
+        if source_frame.size != (content_size, content_size):
+            effect_frame = source_frame.resize((content_size, content_size), Image.Resampling.LANCZOS)
+        else:
+            effect_frame = source_frame
+        try:
+            canvas.alpha_composite(effect_frame, prepared.layouts[slot_index].effect_origin)
+        finally:
             if effect_frame is not source_frame:
                 effect_frame.close()
-        else:
-            draw.rectangle(
-                (
-                    x + 8,
-                    media_top + 8,
-                    x + config.cell_size - 8,
-                    media_top + config.cell_size - 8,
-                ),
-                fill=placeholder_background,
-            )
-            _centered_text(
-                draw,
-                (
-                    x + 12,
-                    media_top + 12,
-                    x + config.cell_size - 12,
-                    media_top + config.cell_size - 12,
-                ),
-                "Prévia indisponível",
-                status_font,
-                muted_fill,
-            )
-
     return canvas
 
 
@@ -645,13 +757,20 @@ def rgba_to_gif_frame(image: Image.Image, config: BuilderConfig) -> Image.Image:
 
 
 def render_page_gif(
+    plan: PagePlan,
     slots: list[DownloadSlot],
     output_path: Path,
     config: BuilderConfig,
 ) -> RenderResult:
-    """Renderiza uma página de até 12 slots sem usar MMC entre animações."""
+    """Renderiza uma página de até 6 slots sem usar MMC entre animações."""
 
     decoded = [decode_slot(slot, config) for slot in slots]
+    prepared = _build_static_page(
+        decoded,
+        config,
+        page_title="VFX Studio Previews",
+        page_indicator=f"{plan.page_number}/{plan.category_page_count}",
+    )
     try:
         largest_frame_count = max(
             (len(slot.frames) for slot in decoded if slot.frames),
@@ -664,7 +783,7 @@ def render_page_gif(
             slot.item.asset_id for slot in decoded if not slot.frames
         )
 
-        first_rgba = render_rgba_frame(decoded, config, tick=0)
+        first_rgba = render_rgba_frame(decoded, config, tick=0, prepared=prepared)
         try:
             first = rgba_to_gif_frame(first_rgba, config)
         finally:
@@ -676,7 +795,7 @@ def render_page_gif(
                 for tick in range(1, frame_count):
                     if previous is not None:
                         previous.close()
-                    rgba = render_rgba_frame(decoded, config, tick=tick)
+                    rgba = render_rgba_frame(decoded, config, tick=tick, prepared=prepared)
                     try:
                         previous = rgba_to_gif_frame(rgba, config)
                     finally:
@@ -713,6 +832,7 @@ def render_page_gif(
             failed_asset_ids=failed_asset_ids,
         )
     finally:
+        prepared.close()
         for slot in decoded:
             slot.close()
 
@@ -1328,6 +1448,7 @@ def build_page_plans(config: BuilderConfig, catalog: VFXCatalog, mode: str, test
                     category=category,
                     category_slug=slug,
                     page_number=page_index + 1,
+                    category_page_count=page_count,
                     items=page_items,
                     page_hash=digest,
                     logical_path=logical_path,
@@ -1473,8 +1594,10 @@ def build_manifest(
             "layout": {
                 "columns": config.columns,
                 "rows": config.rows,
-                "cell_size": config.cell_size,
-                "header_height": config.header_height,
+                "page_header_height": config.page_header_height,
+                "card_width": config.card_width,
+                "card_header_height": config.card_header_height,
+                "preview_height": config.preview_height,
             },
             "timing": {
                 "strategy": "max-visible-frame-count-capped",
@@ -1677,6 +1800,7 @@ async def run_build() -> int:
                         output_path = page_dir / "preview.gif"
                         render = await asyncio.to_thread(
                             render_page_gif,
+                            plan,
                             slots,
                             output_path,
                             config,

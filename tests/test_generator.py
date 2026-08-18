@@ -101,11 +101,11 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(adaptive_fps(self.config, 64), 30)
         self.assertEqual(output_frame_count(self.config, 64), 64)
 
-    def test_geometry_is_2_by_6_with_current_cell_width(self) -> None:
+    def test_geometry_is_2_by_3_with_redesigned_gallery(self) -> None:
         width, height, content = geometry(self.config)
-        self.assertEqual(width, 514)
-        self.assertEqual(height, 1718)
-        self.assertEqual(content, 216)
+        self.assertEqual(width, 696)
+        self.assertEqual(height, 958)
+        self.assertEqual(content, 206)
 
     def test_test_mode_selects_only_requested_pages(self) -> None:
         payload = {}
@@ -118,8 +118,8 @@ class BuilderTests(unittest.TestCase):
         catalog = parse_catalog_bytes(json.dumps(payload).encode())
         plans = build_page_plans(self.config, catalog, "test", 2)
         self.assertEqual(len(plans), 2)
-        self.assertEqual(len(plans[0].items), 12)
-        self.assertEqual(len(plans[1].items), 12)
+        self.assertEqual(len(plans[0].items), 6)
+        self.assertEqual(len(plans[1].items), 6)
 
 
     def test_frame_cut_order_is_row_major(self) -> None:
@@ -139,8 +139,7 @@ class BuilderTests(unittest.TestCase):
 
             decoded = decode_slot(DownloadSlot(self._item(99, 2), path), self.config)
             try:
-                center = self.config.cell_size - self.config.content_padding * 2
-                center //= 2
+                center = geometry(self.config)[2] // 2
                 observed = [frame.getpixel((center, center)) for frame in decoded.frames]
                 self.assertEqual(observed, list(colors))
             finally:
@@ -156,13 +155,13 @@ class BuilderTests(unittest.TestCase):
             }
         catalog = parse_catalog_bytes(json.dumps(payload).encode())
         plans = build_page_plans(self.config, catalog, "full", 2)
-        self.assertEqual([len(plan.items) for plan in plans], [12, 12, 5])
+        self.assertEqual([len(plan.items) for plan in plans], [6, 6, 6, 6, 5])
 
     def test_incremental_reuses_clean_page_but_retries_failed_page(self) -> None:
         item = self._item(1, 2)
         digest = page_hash(self.config, "Fire", (item,))
         plan = PagePlan(
-            "Fire", sanitize_category("Fire"), 1, (item,), digest,
+            "Fire", sanitize_category("Fire"), 1, 1, (item,), digest,
             "vfx-studio/pages/fire/001.gif",
         )
         previous = {
@@ -183,7 +182,7 @@ class BuilderTests(unittest.TestCase):
         item = self._item(7, 4, "Fire / Magic")
         digest = page_hash(self.config, item.category, (item,))
         plan = PagePlan(
-            item.category, sanitize_category(item.category), 3, (item,), digest,
+            item.category, sanitize_category(item.category), 3, 9, (item,), digest,
             "vfx-studio/pages/fire/003.gif",
         )
         first = release_asset_name(plan, "sha256-" + "a" * 64)
@@ -230,10 +229,12 @@ class BuilderTests(unittest.TestCase):
 
             output = root / "page.gif"
             render_config = replace(
-                self.config, cell_size=72, header_height=20,
+                self.config, page_header_height=32, card_width=120,
+                card_header_height=30, preview_height=88,
                 content_padding=4, gap=4, margin=4,
             )
-            result = render_page_gif(slots, output, render_config)
+            plan = PagePlan("Fire", sanitize_category("Fire"), 1, 1, tuple(slot.item for slot in slots), page_hash(render_config, "Fire", tuple(slot.item for slot in slots)), "vfx-studio/test/pages/fire/001.gif")
+            result = render_page_gif(plan, slots, output, render_config)
             self.assertTrue(output.is_file())
             self.assertEqual(result.failed_asset_ids, (4,))
             self.assertEqual(result.output_frames, 64)
@@ -242,7 +243,6 @@ class BuilderTests(unittest.TestCase):
 
             with Image.open(output) as gif:
                 self.assertEqual(getattr(gif, "n_frames", 1), 64)
-                self.assertIn("transparency", gif.info)
 
 
 if __name__ == "__main__":

@@ -627,32 +627,16 @@ def _build_static_page(
     pill_top = header_top + 13
     pill_bottom = pill_top + pill_height
 
-    # Centraliza o grupo [ícone + espaço + título] como um bloco só,
-    # evitando tanto o texto torto quanto o ícone colado nele.
-    icon_width = 22
-    icon_gap = 10
-    title_width, title_height = _text_size(title_font, page_title)
-    group_width = icon_width + icon_gap + title_width
+    # O título agora fica sozinho, centralizado visualmente no espaço
+    # disponível à esquerda do indicador de página.
     title_area_left = header_left + 14
     title_area_right = pill_left - 16
     if title_area_right <= title_area_left:
         title_area_left = header_left + 14
         title_area_right = header_right - 14
-    group_left = title_area_left + max(0, (title_area_right - title_area_left - group_width) // 2)
-    icon_x = group_left + 8
-    icon_y = header_top + max(10, (config.page_header_height - 20) // 2)
-    _draw_spark_icon(
+    _centered_text(
         draw,
-        icon_x,
-        icon_y,
-        color=text_fill,
-        accent=accent_fill,
-    )
-    title_x = group_left + icon_width + icon_gap
-    title_y = header_top + max(0, (header_bottom - header_top - title_height) // 2) - 1
-    _left_text(
-        draw,
-        (title_x, title_y),
+        (title_area_left, header_top, title_area_right, header_bottom),
         page_title,
         title_font,
         text_fill,

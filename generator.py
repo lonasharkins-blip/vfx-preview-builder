@@ -854,6 +854,22 @@ def render_page_gif(
             slot.close()
 
 
+async def _read_limited_stream(stream: Any, max_bytes: int) -> bytes:
+    """Lê o corpo inteiro em chunks sem aceitar resposta maior que o limite."""
+
+    if max_bytes <= 0:
+        raise BuilderError("Limite de leitura inválido.")
+
+    collected = bytearray()
+    async for chunk in stream.iter_chunked(64 * 1024):
+        if not chunk:
+            continue
+        collected.extend(chunk)
+        if len(collected) > max_bytes:
+            raise BuilderError("Resposta ultrapassou o limite de segurança.")
+    return bytes(collected)
+
+
 class GitHubReleaseStore:
     """Armazena previews como assets de uma GitHub Release pública."""
 
@@ -1044,7 +1060,7 @@ class GitHubReleaseStore:
             timeout=aiohttp.ClientTimeout(total=45),
         ) as response:
             if response.status == 200:
-                raw = await response.content.read(max_bytes + 1)
+                raw = await _read_limited_stream(response.content, max_bytes)
             elif response.status in {301, 302, 303, 307, 308}:
                 location = response.headers.get("Location", "")
                 try:
@@ -1067,13 +1083,11 @@ class GitHubReleaseStore:
                             raise NetworkError(
                                 f"Download público do GitHub respondeu HTTP {public_response.status}."
                             )
-                        raw = await public_response.content.read(max_bytes + 1)
+                        raw = await _read_limited_stream(public_response.content, max_bytes)
             else:
                 raise BuilderError(
                     f"Não foi possível baixar asset da Release (HTTP {response.status})."
                 )
-        if len(raw) > max_bytes:
-            raise BuilderError("Asset da Release ultrapassou o limite de segurança.")
         return raw
 
     async def get_latest_manifest(self) -> tuple[str | None, dict[str, Any] | None]:
@@ -1088,15 +1102,37 @@ class GitHubReleaseStore:
             key=lambda item: (str(item.get("created_at", "")), int(item.get("id", 0) or 0)),
             reverse=True,
         )
-        asset = candidates[0]
-        raw = await self._download_asset_bytes(asset, MAX_MANIFEST_BYTES)
-        try:
-            payload = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeError) as error:
-            raise BuilderError("O manifest anterior no GitHub está inválido.") from error
-        if not isinstance(payload, dict):
-            raise BuilderError("O manifest anterior no GitHub não é um objeto JSON.")
-        return str(asset["name"]), payload
+
+        for asset in candidates:
+            asset_name = str(asset.get("name", "manifest desconhecido"))
+            try:
+                raw = await self._download_asset_bytes(asset, MAX_MANIFEST_BYTES)
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeError):
+                LOGGER.warning(
+                    "Ignorando manifest anterior inválido %s e tentando um mais antigo.",
+                    asset_name,
+                )
+                continue
+            except BuilderError:
+                LOGGER.warning(
+                    "Não foi possível ler o manifest anterior %s; tentando um mais antigo.",
+                    asset_name,
+                )
+                continue
+
+            if not isinstance(payload, dict):
+                LOGGER.warning(
+                    "Ignorando manifest anterior %s porque o JSON não é um objeto.",
+                    asset_name,
+                )
+                continue
+            return asset_name, payload
+
+        LOGGER.warning(
+            "Nenhum manifest anterior válido foi encontrado; a biblioteca será regenerada."
+        )
+        return None, None
 
     async def _upload_raw(
         self,

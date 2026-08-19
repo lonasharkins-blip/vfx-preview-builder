@@ -10,6 +10,7 @@ from PIL import Image
 
 from generator import (
     BuilderConfig,
+    BuilderError,
     DownloadSlot,
     PagePlan,
     SOURCE_SPECS_BY_KEY,
@@ -25,6 +26,7 @@ from generator import (
     release_asset_name,
     render_page_gif,
     sanitize_category,
+    _read_limited_stream,
 )
 from sources.vfx_studio import VFXItem, parse_catalog_bytes
 from sources.zonito_visuals import parse_catalog_bytes as parse_zonito_catalog_bytes
@@ -296,6 +298,35 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(
             manifest_asset_names(manifest), {"page--one.gif", "page--two.gif"}
         )
+
+
+    def test_limited_stream_reads_all_chunks_instead_of_only_first_chunk(self) -> None:
+        class FakeStream:
+            def __init__(self, chunks: list[bytes]) -> None:
+                self._chunks = chunks
+
+            async def iter_chunked(self, _size: int):
+                for chunk in self._chunks:
+                    yield chunk
+
+        import asyncio
+
+        payload = b'{"pages":[' + b'{"n":1},' * 5000 + b'{"n":2}]}'
+        chunks = [payload[:20664], payload[20664:40000], payload[40000:]]
+        observed = asyncio.run(_read_limited_stream(FakeStream(chunks), len(payload) + 1))
+        self.assertEqual(observed, payload)
+        self.assertEqual(json.loads(observed)["pages"][-1]["n"], 2)
+
+    def test_limited_stream_rejects_body_over_limit(self) -> None:
+        class FakeStream:
+            async def iter_chunked(self, _size: int):
+                yield b"a" * 10
+                yield b"b" * 10
+
+        import asyncio
+
+        with self.assertRaises(BuilderError):
+            asyncio.run(_read_limited_stream(FakeStream(), 15))
 
     def test_previous_manifest_is_indexed_once(self) -> None:
         manifest = {

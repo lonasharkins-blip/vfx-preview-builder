@@ -1,12 +1,13 @@
-"""Resolve assets públicos antes de recorrer ao Open Cloud autenticado.
+"""Resolve Asset Delivery com parsing tolerante e logs seguros.
 
-As bibliotecas VFX contêm texturas públicas de muitos criadores diferentes. Uma
-ROBLOX_API_KEY válida pode não ter permissão Open Cloud sobre um asset de outro
-criador, mesmo quando esse asset é publicamente entregável pela Roblox.
+O VFX Preview Builder precisa lidar com bibliotecas formadas por assets públicos de
+vários criadores. Esta camada mantém as mesmas garantias de segurança do gerador:
+a ROBLOX_API_KEY só é enviada para o endpoint Open Cloud autenticado e as texturas
+só são baixadas de URLs HTTPS da CDN Roblox.
 
-Este módulo mantém o fluxo Open Cloud original como fallback, mas tenta primeiro o
-Asset Delivery público v2 sem cookie e sem API key. A chave nunca é enviada para
-assetdelivery.roblox.com nem para a CDN.
+O endpoint legado/público é tentado sem credenciais apenas como oportunidade. O
+caminho principal de fallback é o Open Cloud. Em ambos, aceitamos as duas formas de
+payload observadas na família Asset Delivery: ``location`` e ``locations``.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -24,39 +26,88 @@ import generator
 
 
 PUBLIC_ASSET_DELIVERY_URL = "https://assetdelivery.roblox.com/v2/assetId/{asset_id}"
-_ORIGINAL_DELIVERY_LOCATION = generator.RobloxAssetClient._delivery_location
 
 
-def _pick_public_location(payload: object) -> str | None:
-    """Extrai somente uma URL HTTPS da CDN Roblox de uma resposta pública válida."""
+def _location_candidates(payload: object) -> tuple[str, ...]:
+    """Extrai possíveis URLs sem decidir ainda se são seguras."""
 
     if not isinstance(payload, dict):
-        return None
+        return ()
 
-    # O endpoint v2 normalmente retorna uma lista `locations`. Aceitar também
-    # `location` torna o parser tolerante sem relaxar a validação de domínio.
+    candidates: list[str] = []
+
     direct = payload.get("location")
-    if isinstance(direct, str) and generator.RobloxAssetClient._allowed_cdn_url(direct):
-        return direct
+    if isinstance(direct, str) and direct:
+        candidates.append(direct)
 
     locations = payload.get("locations")
-    if not isinstance(locations, list):
-        return None
+    if isinstance(locations, list):
+        for entry in locations:
+            if not isinstance(entry, dict):
+                continue
+            location = entry.get("location")
+            if isinstance(location, str) and location:
+                candidates.append(location)
 
-    for entry in locations:
-        if not isinstance(entry, dict):
-            continue
-        location = entry.get("location")
-        if isinstance(location, str) and generator.RobloxAssetClient._allowed_cdn_url(location):
+    # Mantém a ordem fornecida pela Roblox, mas remove duplicatas.
+    return tuple(dict.fromkeys(candidates))
+
+
+def _pick_cdn_location(payload: object) -> str | None:
+    """Retorna somente uma URL HTTPS validada da CDN Roblox."""
+
+    for location in _location_candidates(payload):
+        if generator.RobloxAssetClient._allowed_cdn_url(location):
             return location
     return None
+
+
+def _safe_candidate_origins(payload: object) -> tuple[str, ...]:
+    """Resume candidatos para diagnóstico sem expor path, query ou assinatura."""
+
+    origins: list[str] = []
+    for location in _location_candidates(payload):
+        try:
+            parts = urlsplit(location)
+        except ValueError:
+            origins.append("<url-invalida>")
+            continue
+
+        scheme = parts.scheme.lower() or "<sem-scheme>"
+        hostname = (parts.hostname or "<sem-host>").lower().rstrip(".")
+        origins.append(f"{scheme}://{hostname}")
+
+    return tuple(dict.fromkeys(origins))
+
+
+def _payload_keys(payload: object) -> tuple[str, ...]:
+    """Retorna apenas nomes de campos, nunca valores potencialmente sensíveis."""
+
+    if not isinstance(payload, dict):
+        return ()
+    return tuple(sorted(str(key) for key in payload.keys()))
+
+
+async def _read_delivery_payload(response: aiohttp.ClientResponse) -> object:
+    """Lê uma resposta pequena do Asset Delivery e valida o JSON."""
+
+    raw = await response.content.read(generator.MAX_DELIVERY_RESPONSE_BYTES + 1)
+    if not raw or len(raw) > generator.MAX_DELIVERY_RESPONSE_BYTES:
+        raise generator.AssetUnavailableError("resposta inválida do Asset Delivery")
+
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise generator.AssetUnavailableError(
+            "resposta inválida do Asset Delivery"
+        ) from error
 
 
 async def _public_delivery_location(
     client: generator.RobloxAssetClient,
     asset_id: int,
 ) -> str | None:
-    """Tenta resolver um asset público sem usar nenhuma credencial."""
+    """Tenta o endpoint público sem enviar cookie ou API key."""
 
     assert client.session is not None
     url = PUBLIC_ASSET_DELIVERY_URL.format(asset_id=asset_id)
@@ -66,18 +117,17 @@ async def _public_delivery_location(
             async with client.session.get(
                 url,
                 headers={"Accept": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=client.config.delivery_timeout_seconds),
+                timeout=aiohttp.ClientTimeout(
+                    total=client.config.delivery_timeout_seconds
+                ),
                 allow_redirects=False,
             ) as response:
                 if response.status == 200:
-                    raw = await response.content.read(generator.MAX_DELIVERY_RESPONSE_BYTES + 1)
-                    if not raw or len(raw) > generator.MAX_DELIVERY_RESPONSE_BYTES:
-                        return None
                     try:
-                        payload: Any = json.loads(raw)
-                    except (json.JSONDecodeError, UnicodeError):
+                        payload = await _read_delivery_payload(response)
+                    except generator.AssetUnavailableError:
                         return None
-                    return _pick_public_location(payload)
+                    return _pick_cdn_location(payload)
 
                 if response.status == 429 or response.status >= 500:
                     if attempt + 1 < client.config.http_retries:
@@ -87,38 +137,114 @@ async def _public_delivery_location(
         except (aiohttp.ClientError, asyncio.TimeoutError):
             if attempt + 1 >= client.config.http_retries:
                 return None
-            await asyncio.sleep(min(2 ** attempt, 10))
+            await asyncio.sleep(min(2**attempt, 10))
 
     return None
+
+
+async def _open_cloud_delivery_location(
+    client: generator.RobloxAssetClient,
+    asset_id: int,
+) -> str:
+    """Resolve pelo Open Cloud aceitando ``location`` e ``locations``.
+
+    Esta função reproduz o tratamento de status/retries do gerador original. A
+    diferença é somente o parser de HTTP 200 e um diagnóstico seguro quando a
+    Roblox devolve um candidato que não passa na whitelist.
+    """
+
+    assert client.session is not None
+    url = generator.ASSET_DELIVERY_URL.format(asset_id=asset_id)
+
+    for attempt in range(client.config.http_retries):
+        try:
+            async with client.session.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "x-api-key": client.api_key,
+                },
+                timeout=aiohttp.ClientTimeout(
+                    total=client.config.delivery_timeout_seconds
+                ),
+                allow_redirects=False,
+            ) as response:
+                if response.status == 200:
+                    payload = await _read_delivery_payload(response)
+                    location = _pick_cdn_location(payload)
+                    if location is not None:
+                        return location
+
+                    # Nunca registra a URL assinada completa. Os nomes dos campos e
+                    # os origins são suficientes para descobrir mudanças de formato
+                    # ou de hostname sem vazar token da CDN.
+                    generator.LOGGER.warning(
+                        "Asset %s: Open Cloud HTTP 200 sem CDN utilizável; "
+                        "campos=%s origins=%s",
+                        asset_id,
+                        _payload_keys(payload) or ("<nenhum>",),
+                        _safe_candidate_origins(payload) or ("<nenhum>",),
+                    )
+                    raise generator.AssetUnavailableError(
+                        "localização CDN inválida"
+                    )
+
+                if response.status == 401:
+                    raise generator.RobloxAuthError(
+                        "A ROBLOX_API_KEY foi recusada."
+                    )
+                if response.status == 403:
+                    raise generator.AssetUnavailableError("sem permissão")
+                if response.status in {404, 410}:
+                    raise generator.AssetUnavailableError("textura indisponível")
+                if response.status == 429 or response.status >= 500:
+                    if attempt + 1 < client.config.http_retries:
+                        await client._sleep_for_retry(response, attempt)
+                        continue
+                    raise generator.NetworkError(
+                        f"Asset Delivery HTTP {response.status}"
+                    )
+                raise generator.AssetUnavailableError(
+                    f"Asset Delivery HTTP {response.status}"
+                )
+
+        except (
+            generator.RobloxAuthError,
+            generator.AssetUnavailableError,
+            generator.NetworkError,
+        ):
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            if attempt + 1 >= client.config.http_retries:
+                raise generator.NetworkError(
+                    "Falha de rede no Asset Delivery."
+                ) from error
+            await asyncio.sleep(min(2**attempt, 10))
+
+    raise generator.NetworkError("Falha no Asset Delivery.")
 
 
 async def _delivery_location(
     client: generator.RobloxAssetClient,
     asset_id: int,
 ) -> str:
-    """Usa público v2 primeiro e preserva o Open Cloud original como fallback."""
+    """Tenta público sem segredo e usa Open Cloud autenticado como caminho seguro."""
 
     public_location = await _public_delivery_location(client, asset_id)
     if public_location is not None:
         return public_location
 
-    # Nenhuma URL ou segredo entra no log. O método original continua responsável
-    # por autenticação, retries e mensagens de erro quando o fallback também falha.
-    generator.LOGGER.debug(
-        "Asset %s não foi resolvido pelo Asset Delivery público; tentando Open Cloud.",
-        asset_id,
-    )
-    return await _ORIGINAL_DELIVERY_LOCATION(client, asset_id)
+    return await _open_cloud_delivery_location(client, asset_id)
 
 
 def install() -> None:
-    """Instala o layout e, em seguida, a resolução pública de assets."""
+    """Instala o layout e o resolvedor sem alterar o restante do builder."""
 
     gallery_layout.install()
     generator.RobloxAssetClient._delivery_location = _delivery_location
 
-    # Inclui esta camada no fingerprint para que um novo teste não reutilize uma
-    # página gerada antes da correção de disponibilidade.
+    # Inclui esta camada no fingerprint para impedir reaproveitamento de páginas
+    # produzidas antes desta correção.
     resolver_source = Path(__file__).read_bytes()
     generator.GENERATOR_SOURCE_SHA256 = hashlib.sha256(
         generator.GENERATOR_SOURCE_SHA256.encode("ascii")

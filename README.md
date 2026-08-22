@@ -21,23 +21,25 @@ Não usa Cloudflare R2, cartão, boto3, cookies Roblox ou `.ROBLOSECURITY`.
 
 Cada fonte é processada separadamente. Cada página contém até **6 flipbooks**, em **2 colunas × 3 linhas**.
 
-Cada célula mantém:
+O layout atual segue a galeria usada pela Sha5:
 
-```text
-Texture ID
-[preview animado]
-```
+- cada preview ocupa todo o quadrado disponível até a borda;
+- borda branca arredondada em cada quadrado;
+- fundo geral escuro;
+- divisória vertical pontilhada entre as duas colunas;
+- cada item recebe somente o número visual **1–6** sobre o próprio preview;
+- o Texture ID real não é desenhado no GIF e continua disponível nos detalhes do comando Discord;
+- não existe cabeçalho separado por card nem indicador de página dentro do GIF.
 
-A versão atual usa um layout de galeria em tema escuro, com **somente o indicador `X/Y` centralizado no cabeçalho**, cards arredondados e IDs desenhados de forma que não sejam cortados.
-
-Medidas atuais do layout:
+Medidas atuais do layout publicado:
 
 - **2 colunas × 3 linhas**;
-- **696 × 958 px** por página;
-- cards com **326 px de largura**;
-- cabeçalho do card separado da área preta do preview.
+- **678 × 976 px** por página;
+- cards quadrados de **300 × 300 px**;
+- área útil de **292 × 292 px**, descontando apenas a borda de 4 px;
+- gap central horizontal de 42 px e gap vertical de 20 px.
 
-O GIF usa uma **paleta global fixa por página**. Isso mantém fundo, cards, bordas e cabeçalhos exatamente no mesmo tom durante todos os frames, evitando o efeito visual de cores mudando sutilmente.
+O GIF usa uma **paleta global fixa por página**. Isso mantém fundo, bordas e demais elementos estáticos exatamente no mesmo tom durante todos os frames, evitando o efeito visual de cores mudando sutilmente.
 
 O builder preserva:
 
@@ -117,9 +119,25 @@ Antes de gerar:
 
 Não há `HEAD`/consulta HTTP individual para cada página.
 
+A camada visual fica em `gallery_layout.py`. O workflow executa `public_asset_delivery.py`, que instala o layout e o resolvedor de Asset Delivery antes de chamar a infraestrutura existente de `generator.py`. O hash usado nas páginas inclui essas camadas, então qualquer mudança visual ou no resolvedor invalida os GIFs antigos automaticamente.
+
+## Asset Delivery da Roblox
+
+O builder nunca coloca a `ROBLOX_API_KEY` em URL, log, arquivo ou requisição para CDN.
+
+Fluxo atual:
+
+1. pode tentar `https://assetdelivery.roblox.com/v2/assetId/<ID>` **sem credencial**;
+2. se não houver localização pública utilizável, usa `https://apis.roblox.com/asset-delivery-api/v1/assetId/<ID>` com `x-api-key`;
+3. respostas HTTP 200 são compatíveis tanto com `location` quanto com `locations`;
+4. somente uma URL HTTPS de `rbxcdn.com` ou subdomínio é aceita;
+5. a textura é baixada da CDN sem enviar a API key.
+
+Se a Roblox responder HTTP 200 sem uma localização que passe na whitelist, o log registra somente os **nomes dos campos** do JSON e o **scheme/hostname** dos candidatos. Path, query string, assinatura temporária e chave nunca são registrados.
+
 ## Secrets necessários
 
-Agora existe apenas **um Secret manual**:
+Existe apenas **um Secret manual**:
 
 ```text
 ROBLOX_API_KEY
@@ -131,9 +149,7 @@ Nunca coloque sua `ROBLOX_API_KEY` em arquivo, commit, README ou mensagem públi
 
 ## ROBLOX_API_KEY
 
-Se você já possui uma chave que funciona no fluxo atual de Asset Delivery do `/ro-flipbooks`, use essa mesma chave no Secret do GitHub.
-
-O builder envia a chave somente para:
+Use no Secret do GitHub uma chave Open Cloud válida para Asset Delivery. O builder envia essa chave somente para:
 
 ```text
 https://apis.roblox.com/asset-delivery-api/v1/assetId/<ID>
@@ -141,7 +157,7 @@ https://apis.roblox.com/asset-delivery-api/v1/assetId/<ID>
 
 A URL CDN retornada pela Roblox é baixada em uma segunda requisição **sem a API Key**.
 
-Se criar uma chave nova, configure no Creator Dashboard somente as permissões de Assets/Asset Delivery necessárias aos assets que sua conta pode acessar. A interface/documentação de scopes da Roblox pode mudar; um HTTP 403 no Actions normalmente significa que a chave não tem acesso ao asset/creator necessário.
+Se criar uma chave nova, configure no Creator Dashboard somente as permissões de Assets/Asset Delivery necessárias. A interface/documentação de scopes da Roblox pode mudar, então confira a documentação oficial atual ao criar ou revisar a chave.
 
 ## Configurar o GitHub pelo celular
 
@@ -202,14 +218,14 @@ Actions
 → Run workflow
 ```
 
-Escolha:
+Escolha a branch da alteração e depois:
 
 ```text
 mode: test
 test_pages: 1
 ```
 
-Não use `full` ainda.
+Não use `full` antes de conferir visualmente o resultado de teste.
 
 ### 5. Verificar o resultado
 
@@ -218,7 +234,7 @@ Se o workflow terminar verde, abra a área **Releases** do repositório.
 Devem existir duas Releases de teste:
 
 ```text
-VFX previews (test)          → vfx-previews-test
+VFX previews (test)           → vfx-previews-test
 ZonitoVisuals previews (test) → vfx-previews-zonito-test
 ```
 
@@ -229,18 +245,12 @@ Cada uma deve conter pelo menos:
 
 Abra o GIF pelo navegador e confira principalmente:
 
-- cabeçalho da página;
-- indicador `X/Y`;
-- cards arredondados;
-- IDs sem corte;
+- seis quadrados no layout 2×3;
+- preview preenchendo o quadrado até a borda branca;
+- numeração 1–6 sem Texture ID desenhado;
+- divisória central pontilhada;
 - animação dos 6 VFX;
-- placeholders quando houver falha individual.
-
-Se o GIF carregar e animar, a prova de arquitetura foi concluída:
-
-```text
-GitHub Actions → VFX Studio/ZonitoVisuals → Roblox → Pillow → GitHub Releases → HTTPS
-```
+- placeholders somente quando houver falha individual real.
 
 ## Modo full
 
@@ -279,7 +289,7 @@ GitHub Releases aceita até 1000 assets por Release e arquivos individuais abaix
 
 Uma mudança no conteúdo binário de uma textura Roblox que mantenha exatamente o mesmo Asset ID e os mesmos metadados do catálogo pode não ser detectada por uma página já considerada limpa, pois detectar isso exigiria baixar novamente todos os assets e eliminaria boa parte do benefício incremental.
 
-Os efeitos continuam respeitando alpha internamente, mas a galeria final agora usa **fundo escuro/área de preview preta** para melhor legibilidade, aparência no Discord e compressão do GIF.
+Os efeitos continuam respeitando alpha internamente, mas a galeria final usa **fundo escuro/área de preview preta** para melhor legibilidade, aparência no Discord e compressão do GIF.
 
 ## Testes locais
 
@@ -289,4 +299,4 @@ python -m unittest discover -s tests -v
 
 Os testes não precisam de secrets nem acessam suas contas.
 
-A entrega foi validada offline com testes sintéticos, compilação Python e verificações estruturais. Ela **não foi executada contra sua conta GitHub nem com sua ROBLOX_API_KEY**, porque essas credenciais não devem ser compartilhadas.
+A entrega deve ser validada primeiro em `mode: test` antes de atualizar as Releases `full` usadas pela Sha5.

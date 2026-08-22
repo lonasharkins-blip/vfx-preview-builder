@@ -6,8 +6,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import generator
 from public_asset_delivery import (
+    CONTENT_DELIVERY_HOST,
     PUBLIC_ASSET_DELIVERY_URL,
+    _allowed_asset_location,
     _delivery_location,
     _location_candidates,
     _open_cloud_delivery_location,
@@ -85,6 +88,31 @@ class PublicAssetDeliveryTests(unittest.TestCase):
             ),
         )
 
+    def test_allowed_asset_location_accepts_exact_contentdelivery_host(self) -> None:
+        self.assertEqual(CONTENT_DELIVERY_HOST, "contentdelivery.roblox.com")
+        self.assertTrue(
+            _allowed_asset_location(
+                "https://contentdelivery.roblox.com/v1/asset?id=example"
+            )
+        )
+
+    def test_allowed_asset_location_rejects_lookalike_contentdelivery_hosts(self) -> None:
+        self.assertFalse(
+            _allowed_asset_location(
+                "https://contentdelivery.roblox.com.evil.example/file"
+            )
+        )
+        self.assertFalse(
+            _allowed_asset_location(
+                "https://sub.contentdelivery.roblox.com/file"
+            )
+        )
+        self.assertFalse(
+            _allowed_asset_location(
+                "http://contentdelivery.roblox.com/insecure"
+            )
+        )
+
     def test_pick_location_accepts_valid_rbxcdn_location_list(self) -> None:
         payload = {
             "locations": [
@@ -94,6 +122,15 @@ class PublicAssetDeliveryTests(unittest.TestCase):
         self.assertEqual(
             _pick_cdn_location(payload),
             "https://t0.rbxcdn.com/example-texture",
+        )
+
+    def test_pick_location_accepts_contentdelivery_location(self) -> None:
+        payload = {
+            "location": "https://contentdelivery.roblox.com/v1/asset?id=signed"
+        }
+        self.assertEqual(
+            _pick_cdn_location(payload),
+            "https://contentdelivery.roblox.com/v1/asset?id=signed",
         )
 
     def test_pick_location_skips_invalid_entry_before_valid_one(self) -> None:
@@ -133,12 +170,12 @@ class PublicAssetDeliveryTests(unittest.TestCase):
     def test_safe_diagnostics_never_include_path_or_query(self) -> None:
         payload = {
             "location": (
-                "https://sc2.rbxcdn.com/private-path"
+                "https://contentdelivery.roblox.com/private-path"
                 "?__token__=should-never-appear"
             )
         }
         origins = _safe_candidate_origins(payload)
-        self.assertEqual(origins, ("https://sc2.rbxcdn.com",))
+        self.assertEqual(origins, ("https://contentdelivery.roblox.com",))
         rendered = repr(origins)
         self.assertNotIn("private-path", rendered)
         self.assertNotIn("should-never-appear", rendered)
@@ -176,6 +213,22 @@ class PublicAssetDeliveryTests(unittest.TestCase):
             },
         )
 
+    def test_open_cloud_accepts_contentdelivery_location(self) -> None:
+        client = _FakeClient(
+            _FakeResponse(
+                200,
+                {
+                    "requestId": "example",
+                    "location": "https://contentdelivery.roblox.com/v1/asset?id=abc",
+                },
+            )
+        )
+        location = asyncio.run(_open_cloud_delivery_location(client, 777))
+        self.assertEqual(
+            location,
+            "https://contentdelivery.roblox.com/v1/asset?id=abc",
+        )
+
     def test_open_cloud_accepts_plural_locations(self) -> None:
         client = _FakeClient(
             _FakeResponse(
@@ -190,6 +243,16 @@ class PublicAssetDeliveryTests(unittest.TestCase):
         )
         location = asyncio.run(_open_cloud_delivery_location(client, 654))
         self.assertEqual(location, "https://fts.rbxcdn.com/signed-texture")
+
+    def test_install_target_helper_matches_downloader_security_shape(self) -> None:
+        self.assertTrue(_allowed_asset_location("https://t0.rbxcdn.com/final"))
+        self.assertTrue(
+            _allowed_asset_location("https://contentdelivery.roblox.com/intermediate")
+        )
+        self.assertFalse(_allowed_asset_location("https://example.com/file"))
+        self.assertFalse(
+            _allowed_asset_location("https://user:pass@contentdelivery.roblox.com/file")
+        )
 
     def test_delivery_uses_open_cloud_when_public_resolution_fails(self) -> None:
         client = _FakeClient(_FakeResponse(200, {}))

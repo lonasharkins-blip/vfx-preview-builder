@@ -52,6 +52,12 @@ O builder preserva:
 
 A timeline não usa MMC. Cada VFX simplesmente usa `tick % quantidade_de_frames` dentro de uma timeline comum limitada.
 
+## Asset Delivery
+
+As bibliotecas incluem assets públicos de vários criadores. Por isso, o builder tenta primeiro o endpoint público `assetdelivery.roblox.com/v2/assetId/<ID>` **sem cookie e sem API key**. Se esse caminho não devolver uma URL válida da CDN Roblox, o fluxo Open Cloud autenticado existente é usado como fallback.
+
+A `ROBLOX_API_KEY` nunca é enviada para `assetdelivery.roblox.com` nem para hosts `rbxcdn.com`; ela continua restrita ao endpoint Open Cloud `apis.roblox.com/asset-delivery-api/v1/assetId/<ID>`.
+
 ## Releases usadas
 
 Cada fonte possui suas próprias Releases. Isso evita misturar assets e mantém cada biblioteca longe do limite de 1000 assets por Release do GitHub.
@@ -119,7 +125,7 @@ Antes de gerar:
 
 Não há `HEAD`/consulta HTTP individual para cada página.
 
-A camada visual fica em `gallery_layout.py`. O workflow executa esse módulo, que preserva toda a infraestrutura de `generator.py` e substitui somente a geometria/composição antes da geração. O hash usado nas páginas combina o código do gerador com o código do layout, então qualquer mudança visual invalida os GIFs antigos automaticamente.
+A camada visual fica em `gallery_layout.py`. O workflow executa `public_asset_delivery.py`, que instala o layout, adiciona a resolução pública de assets e depois preserva toda a infraestrutura de `generator.py`. O hash usado nas páginas inclui essas camadas, então qualquer mudança relevante invalida corretamente os GIFs antigos quando necessário.
 
 ## Secrets necessários
 
@@ -137,7 +143,7 @@ Nunca coloque sua `ROBLOX_API_KEY` em arquivo, commit, README ou mensagem públi
 
 Se você já possui uma chave que funciona no fluxo atual de Asset Delivery do `/ro-flipbooks`, use essa mesma chave no Secret do GitHub.
 
-O builder envia a chave somente para:
+A chave é usada somente no fallback Open Cloud:
 
 ```text
 https://apis.roblox.com/asset-delivery-api/v1/assetId/<ID>
@@ -145,7 +151,7 @@ https://apis.roblox.com/asset-delivery-api/v1/assetId/<ID>
 
 A URL CDN retornada pela Roblox é baixada em uma segunda requisição **sem a API Key**.
 
-Se criar uma chave nova, configure no Creator Dashboard somente as permissões de Assets/Asset Delivery necessárias aos assets que sua conta pode acessar. A interface/documentação de scopes da Roblox pode mudar; um HTTP 403 no Actions normalmente significa que a chave não tem acesso ao asset/creator necessário.
+Se criar uma chave nova, configure no Creator Dashboard somente as permissões de Assets/Asset Delivery necessárias aos assets que sua conta pode acessar. A interface/documentação de scopes da Roblox pode mudar; um HTTP 403 no fallback Open Cloud normalmente significa que a chave não tem acesso ao asset/creator necessário.
 
 ## Configurar o GitHub pelo celular
 

@@ -1,8 +1,59 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from public_asset_delivery import PUBLIC_ASSET_DELIVERY_URL, _pick_public_location
+from public_asset_delivery import (
+    PUBLIC_ASSET_DELIVERY_URL,
+    _delivery_location,
+    _pick_public_location,
+    _public_delivery_location,
+)
+
+
+class _FakeContent:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    async def read(self, _limit: int) -> bytes:
+        return self.payload
+
+
+class _FakeResponse:
+    def __init__(self, status: int, payload: object) -> None:
+        self.status = status
+        self.headers: dict[str, str] = {}
+        self.content = _FakeContent(json.dumps(payload).encode("utf-8"))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse) -> None:
+        self.response = response
+        self.last_url: str | None = None
+        self.last_headers: dict[str, str] | None = None
+
+    def get(self, url: str, *, headers: dict[str, str], **_kwargs):
+        self.last_url = url
+        self.last_headers = headers
+        return self.response
+
+
+class _FakeClient:
+    def __init__(self, response: _FakeResponse) -> None:
+        self.session = _FakeSession(response)
+        self.config = SimpleNamespace(http_retries=2, delivery_timeout_seconds=2)
+
+    async def _sleep_for_retry(self, _response, _attempt: int) -> None:
+        return None
 
 
 class PublicAssetDeliveryTests(unittest.TestCase):
@@ -53,6 +104,40 @@ class PublicAssetDeliveryTests(unittest.TestCase):
             _pick_public_location({"location": "https://rbxcdn.com/direct"}),
             "https://rbxcdn.com/direct",
         )
+
+    def test_public_request_uses_no_api_key_header(self) -> None:
+        client = _FakeClient(
+            _FakeResponse(
+                200,
+                {"locations": [{"location": "https://t0.rbxcdn.com/public"}]},
+            )
+        )
+        location = asyncio.run(_public_delivery_location(client, 123))
+        self.assertEqual(location, "https://t0.rbxcdn.com/public")
+        self.assertEqual(
+            client.session.last_url,
+            "https://assetdelivery.roblox.com/v2/assetId/123",
+        )
+        self.assertEqual(client.session.last_headers, {"Accept": "application/json"})
+        self.assertNotIn("x-api-key", client.session.last_headers)
+
+    def test_open_cloud_fallback_is_used_when_public_resolution_fails(self) -> None:
+        client = _FakeClient(_FakeResponse(404, {}))
+
+        async def fallback(_client, asset_id: int) -> str:
+            self.assertEqual(asset_id, 456)
+            return "https://c0.rbxcdn.com/fallback"
+
+        with patch(
+            "public_asset_delivery._public_delivery_location",
+            new=AsyncMock(return_value=None),
+        ), patch(
+            "public_asset_delivery._ORIGINAL_DELIVERY_LOCATION",
+            new=fallback,
+        ):
+            location = asyncio.run(_delivery_location(client, 456))
+
+        self.assertEqual(location, "https://c0.rbxcdn.com/fallback")
 
 
 if __name__ == "__main__":

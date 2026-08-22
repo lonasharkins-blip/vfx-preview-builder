@@ -2,12 +2,16 @@
 
 O VFX Preview Builder precisa lidar com bibliotecas formadas por assets públicos de
 vários criadores. Esta camada mantém as mesmas garantias de segurança do gerador:
-a ROBLOX_API_KEY só é enviada para o endpoint Open Cloud autenticado e as texturas
-só são baixadas de URLs HTTPS da CDN Roblox.
+a ROBLOX_API_KEY só é enviada para o endpoint Open Cloud autenticado e nunca é
+reaproveitada nas chamadas de download da textura.
 
 O endpoint legado/público é tentado sem credenciais apenas como oportunidade. O
 caminho principal de fallback é o Open Cloud. Em ambos, aceitamos as duas formas de
 payload observadas na família Asset Delivery: ``location`` e ``locations``.
+
+A resposta Open Cloud pode apontar para ``contentdelivery.roblox.com`` antes de
+redirecionar para ``rbxcdn.com``. Esse host intermediário é aceito de forma exata;
+não abrimos a whitelist para outros subdomínios de ``roblox.com``.
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -26,6 +29,8 @@ import generator
 
 
 PUBLIC_ASSET_DELIVERY_URL = "https://assetdelivery.roblox.com/v2/assetId/{asset_id}"
+CONTENT_DELIVERY_HOST = "contentdelivery.roblox.com"
+_ORIGINAL_ALLOWED_CDN_URL = generator.RobloxAssetClient._allowed_cdn_url
 
 
 def _location_candidates(payload: object) -> tuple[str, ...]:
@@ -53,11 +58,34 @@ def _location_candidates(payload: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
+def _allowed_asset_location(url: str) -> bool:
+    """Aceita a CDN final e o host intermediário oficial observado no Open Cloud."""
+
+    if _ORIGINAL_ALLOWED_CDN_URL(url):
+        return True
+
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    return (
+        parts.scheme.lower() == "https"
+        and bool(parts.netloc)
+        and parts.username is None
+        and parts.password is None
+        and port in {None, 443}
+        and hostname == CONTENT_DELIVERY_HOST
+    )
+
+
 def _pick_cdn_location(payload: object) -> str | None:
-    """Retorna somente uma URL HTTPS validada da CDN Roblox."""
+    """Retorna somente uma URL HTTPS validada da infraestrutura Roblox."""
 
     for location in _location_candidates(payload):
-        if generator.RobloxAssetClient._allowed_cdn_url(location):
+        if _allowed_asset_location(location):
             return location
     return None
 
@@ -179,14 +207,14 @@ async def _open_cloud_delivery_location(
                     # os origins são suficientes para descobrir mudanças de formato
                     # ou de hostname sem vazar token da CDN.
                     generator.LOGGER.warning(
-                        "Asset %s: Open Cloud HTTP 200 sem CDN utilizável; "
+                        "Asset %s: Open Cloud HTTP 200 sem localização utilizável; "
                         "campos=%s origins=%s",
                         asset_id,
                         _payload_keys(payload) or ("<nenhum>",),
                         _safe_candidate_origins(payload) or ("<nenhum>",),
                     )
                     raise generator.AssetUnavailableError(
-                        "localização CDN inválida"
+                        "localização do asset inválida"
                     )
 
                 if response.status == 401:
@@ -241,6 +269,13 @@ def install() -> None:
     """Instala o layout e o resolvedor sem alterar o restante do builder."""
 
     gallery_layout.install()
+
+    # O downloader original valida a localização antes de cada request e redirect.
+    # Expandimos essa validação somente para o host intermediário exato observado
+    # no Open Cloud. A API key continua ausente dessas chamadas de download.
+    generator.RobloxAssetClient._allowed_cdn_url = staticmethod(
+        _allowed_asset_location
+    )
     generator.RobloxAssetClient._delivery_location = _delivery_location
 
     # Inclui esta camada no fingerprint para impedir reaproveitamento de páginas
